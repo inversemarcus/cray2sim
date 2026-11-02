@@ -19,6 +19,7 @@ tests/test_fp: tests/test_fp.c sim/cray2fp.c sim/cray2fp.h
 test: sim/cray2sim tests/test_fp
 	./tests/test_fp
 	python3 tests/test_asm.py
+	python3 tests/test_semantics.py
 
 clean:
 	rm -f sim/cray2sim tests/test_fp

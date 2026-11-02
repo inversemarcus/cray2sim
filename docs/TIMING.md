@@ -53,14 +53,26 @@ overridden on the `cray2sim` command line (`name=value`) for sensitivity runs.
 - Exact operand-arrival timing inside a functional unit pipeline. Only startup
   plus one element per CP is modelled.
 
+## Ordering between processors
+
+In the default mode the emulator always executes the instruction that issues
+earliest across the four processors. Each processor's next issue time is
+computed from its own register and unit reservations without side effects,
+so memory effects happen in issue order. A vector memory instruction's element
+references are all applied at issue, with their bank timing modelled per
+element. Programs that read data another processor is still streaming,
+without synchronising, can see it slightly early.
+
 ## Fast multithreaded mode
 
 `cray2sim mt=1 [qwin=N]` runs each Background Processor on its own host thread,
 synchronised every N clock periods (default 2,000). Within a window a
 processor sees other processors' bank-busy times as of the window start, so
-cross-processor bank conflicts inside a window are missed. Functional results
-are identical to the single-threaded mode, provided programs synchronise
-through the semaphore and Common Memory words, as real CRAY-2 programs must.
+cross-processor bank conflicts inside a window are missed. Scalar Common Memory references are atomic acquire/release accesses. Programs
+that synchronise through the semaphore and scalar memory words, as real CRAY-2
+programs must, compute the same results as in the default mode; the model
+programs in cray2-llm produced bit-identical outputs in both modes in our
+tests.
 Clock counts read slightly low (about 0.8% on a bank-heavy workload) and vary
 a little from run to run. Use the default single-threaded mode for timing.
 

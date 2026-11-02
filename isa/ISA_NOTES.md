@@ -97,7 +97,9 @@ From 2.1.3 (lines 744-766, pp.2-3/2-4) and Section 3 (lines 1834-1940):
 - **007 `csm`** clears the flag. The instruction issues immediately, but "the following instruction does not issue until the Common Memory quadrant buffers are clear", which gives release ordering for earlier writes.
 - In 1989, S/N 2025 adds Shared registers: `137` "read and increment" is a fetch-and-add style primitive.
 
-## Common Memory (Section 4, verbatim from PDF pp.4-1..4-3, checked visually)
+## Common Memory (Section 4)
+
+The quoted paragraphs below are from Cray Research, *CRAY-2 Computer System Functional Description* (HR-2000, May 1985), pp. 4-1 to 4-3, checked visually against the PDF.
 
 > Common Memory contains 256 million words of dynamic memory. The dynamic memory consists of 128 banks with 2 million words in each bank. Each 72-bit word consists of 64-data bits and 8 error correction bits.
 >

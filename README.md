@@ -23,7 +23,7 @@ EXIT 0 7 663 P=32 A=0,4096,1,64,8192,0,1,0 S=0,ff,a,1,4001c00000000000,400290000
 |---|---|
 | `sim/cray2sim.c` | The emulator (below) |
 | `sim/cray2fp.c`, `cray2fp.h` | CRAY-2 64-bit floating point (48-bit coefficient, 15-bit exponent, truncated-matrix multiply, reciprocal/rsqrt approximation and iteration, FIX/FLT) |
-| `cray2/cal2.py` | Two-pass assembler for CAL Version 2 instruction syntax. Writes a raw word image, a listing and a symbol table. `python3 -m cray2.cal2 in.cal out.bin` |
+| `cray2/cal2.py` | Two-pass assembler for the machine-instruction subset of CAL Version 2 syntax (instructions, labels, `name = expr`, `CON`, `BSSZ`, `ALIGN`; no macros or other pseudo-ops). Writes a raw word image, a listing and a symbol table. `python3 -m cray2.cal2 in.cal out.bin` |
 | `cray2/client.py` | Python client for the emulator's line protocol |
 | `cray2/runprog.py` | Assemble and run a program on CPU 0 |
 | `isa/cray2_isa.json` | All 148 instruction forms, each with semantics, functional unit, parcel count and a page/line citation into the 1985 manual (plus the 1989 revision's additions, marked) |
@@ -60,9 +60,16 @@ Each processor has its own clock. The model includes:
   57-clock bank busy;
 - Local Memory latency, and instruction-buffer misses.
 
-Processors run interleaved by earliest next-issue time and share the bank
-timers. `mt=1` selects a faster multithreaded mode that produces identical
-results and slightly optimistic clocks.
+In the default mode, processors execute strictly in order of their next
+instruction's true issue time and share the bank timers. One simplification:
+a vector memory instruction's element accesses all take effect when the
+instruction issues, although their bank timing is modelled element by element.
+This matters only for programs that race on data without synchronising.
+
+`mt=1` selects a faster multithreaded mode. Its clocks are slightly
+optimistic. In our model runs its results were bit-identical to the default
+mode, but that is only guaranteed for programs that synchronise through
+scalar memory words and the semaphore (see `docs/TIMING.md`).
 
 Several numbers are not in any surviving document. These are vector
 logical/integer startup, unit turnaround and branch cost; each is marked as an
@@ -74,9 +81,12 @@ assumption in `docs/TIMING.md` and can be overridden on the command line.
   order to compare against.
 - **Unpublished approximation tables.** The reciprocal and reciprocal-sqrt
   approximation tables were never published. The emulator models them as a
-  12-bit table plus the documented interpolation step, about 30 bits. Code
-  that follows them with the documented refinement iteration gets full
-  precision regardless.
+  12-bit table plus the documented interpolation step, about 30 bits.
+- **Iteration instructions are approximated.** The iteration instructions
+  (126/127, 156/157) are modelled as an ordinary truncated multiply followed
+  by a subtraction. The real hardware folds the constant into a special
+  rounding pattern (HR-2000 figures 2-4 and 2-5), so the last bits of
+  reciprocals and square roots may differ from a real CRAY-2.
 - **Floating-add rounding.** The manual says the shifted operand is "rounded
   up". This is modelled as round-half-up of the shifted-out bit.
 - **Memory effects not modelled:** refresh and quadrant-buffer backup stalls.
@@ -90,6 +100,8 @@ emulator at about 4 seconds of CRAY-2 time per token.
 
 ## License
 
-MIT. The CRAY-2 manuals are Cray Research documents; they are cited here, not
-redistributed. A public scan of HR-2000 is at
+MIT, for the code and our own documentation. The CRAY-2 manuals are Cray
+Research documents and are not redistributed here. `isa/ISA_NOTES.md` includes
+short passages quoted from HR-2000, marked as quotations and attributed, for
+reference and commentary. A public scan of HR-2000 is at
 <https://www.mrynet.com/cray/HR-2000-CRAY_2_Computer_System_Functional_Description-May_1985.OCR.pdf>.

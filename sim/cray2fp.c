@@ -2,7 +2,7 @@
 #include "cray2fp.h"
 #include <math.h>
 
-int cf_range_error;
+_Thread_local int cf_range_error;
 typedef unsigned __int128 u128;
 
 static uint64_t ovf(int sig) { cf_range_error = 1; return (uint64_t)sig << 48; }
@@ -94,27 +94,39 @@ uint64_t cf_mul(uint64_t a, uint64_t b) {
 }
 
 // --- approximations (modelled; see header) ---
-static uint64_t from_double_trunc(double d, int bits) {
+static __attribute__((unused)) uint64_t from_double_trunc(double d, int bits) {
   uint64_t x = cf_from_double(d);
   uint64_t keep = ~((1ULL << (48 - bits)) - 1) & CF_COEF;
   return (x & ~CF_COEF) | (x & keep);
 }
 
+// Build a Cray float from a double in [0.25, 2) scaled by 2^scale, keeping
+// `bits` significant coefficient bits; the exponent is handled in integers so
+// the full CRAY-2 exponent range is preserved.
+static uint64_t scaled(double r, long scale, int bits, int sig) {
+  int e;
+  double m = frexp(r, &e);                      // r = m * 2^e, m in [0.5, 1)
+  uint64_t c = (uint64_t)ldexp(m, 48);
+  c &= ~((1ULL << (48 - bits)) - 1) & CF_COEF;
+  long ex = (long)e + scale + CF_BIAS;
+  if (ex < CF_EXPMIN) return 0;
+  if (ex >= CF_EXPOVF) return ovf(sig);
+  return cf_make(0, (int)ex, c);
+}
+
 uint64_t cf_recip_approx(uint64_t a) {
   int ea = cf_exp(a);
   if (ea >= CF_EXPOVF || ea < CF_EXPMIN || !cf_coef(a)) return ovf(060002);
-  // Normalize the operand view: coefficient in [0.5,1).
   uint64_t c = cf_coef(a);
   int sh = 0;
   while (!(c >> 47)) { c <<= 1; sh++; }
-  double B = (double)c / 281474976710656.0;           // [0.5,1)
-  double A = 1.0 / (((c >> 36) + 0.5) / 4096.0);
-  A = floor(A * 65536.0) / 65536.0;                    // table entry precision
-  double R = 2 * A - A * A * B;
-  int e = ea - CF_BIAS - sh;                            // operand = B * 2^e
-  double r = R * ldexp(1.0, -e);
-  uint64_t out = from_double_trunc((a >> 63) ? -r : r, 30);
-  return out;
+  double B = (double)c / 281474976710656.0;            // operand = B * 2^e, B in [0.5,1)
+  double A = 1.0 / (((c >> 36) + 0.5) / 4096.0);        // table entry for the high 12 bits
+  A = floor(A * 65536.0) / 65536.0;
+  double R = 2 * A - A * A * B;                         // documented interpolation step
+  long e = (long)ea - CF_BIAS - sh;
+  uint64_t r = scaled(R, -e, 30, 060002);
+  return (a >> 63) ? r ^ CF_SIGN : r;
 }
 
 uint64_t cf_recip_iter(uint64_t a, uint64_t b) {
@@ -126,9 +138,13 @@ uint64_t cf_recip_iter(uint64_t a, uint64_t b) {
 uint64_t cf_rsqrt_approx(uint64_t a) {
   int ea = cf_exp(a);
   if (ea >= CF_EXPOVF || (a >> 63) || ea <= 3 || !cf_coef(a)) return ovf(060004);
-  double v = cf_to_double(a);
-  double r = 1.0 / sqrt(v);
-  return from_double_trunc(r, 30);
+  uint64_t c = cf_coef(a);
+  int sh = 0;
+  while (!(c >> 47)) { c <<= 1; sh++; }
+  long e = (long)ea - CF_BIAS - sh;                     // operand = m * 2^e, m in [0.5,1)
+  double m = (double)c / 281474976710656.0;
+  if (e & 1) { m *= 2; e -= 1; }                        // make the exponent even
+  return scaled(1.0 / sqrt(m), -e / 2, 30, 060004);
 }
 
 uint64_t cf_rsqrt_iter(uint64_t a, uint64_t b) {

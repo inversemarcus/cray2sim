@@ -34,7 +34,7 @@
 #define CF_EXPMIN 020000
 #define CF_EXPOVF 060000
 
-extern int cf_range_error;  // sticky flag set by overflow conditions
+extern _Thread_local int cf_range_error;  // set by floating range errors; cleared per instruction
 
 static inline int cf_exp(uint64_t x) { return (int)((x >> 48) & 077777); }
 static inline uint64_t cf_coef(uint64_t x) { return x & CF_COEF; }

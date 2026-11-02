@@ -19,7 +19,8 @@ R = {'Ai': r'(?P<i>A[0-7])', 'Aj': r'(?P<j>A[0-7])', 'Ak': r'(?P<k>A[0-7])',
 
 # (template, opcode, kind).  kind: 'ijk' plain; special handling otherwise.
 FORMS = [
-    ('EXIT exp', 0o000, 'exitx'), ('ERR', 0o000, 'none'), ('PASS', 0o076, 'none'),
+    ('EXIT exp', 0o000, 'exitx'), ('EXIT', 0o000, 'none'), ('ERR', 0o000, 'none'), ('PASS', 0o076, 'none'),
+    ('DRI', 0o035, 'k0'), ('ERI', 0o035, 'k1'), ('DFI', 0o035, 'k2'), ('EFI', 0o035, 'k3'),
     ('R,Ai Ak', 0o002, 'ijk'), ('J Ak', 0o002, 'jak'), ('J exp', 0o003, 'm2'),
     ('JCS exp', 0o004, 'm2'), ('JSS exp', 0o005, 'm2'), ('SSM', 0o006, 'none'), ('CSM', 0o007, 'none'),
     ('JZ Ak,exp', 0o010, 'm2'), ('JN Ak,exp', 0o011, 'm2'), ('JP Ak,exp', 0o012, 'm2'), ('JM Ak,exp', 0o013, 'm2'),
@@ -123,8 +124,8 @@ class Assembler:
                 return [(op << 9) | (k << 6) | k]
             if kind == 'copy':
                 return [(op << 9) | (i << 6) | (j << 3) | j]
-            if kind in ('k0', 'k1'):
-                return [(op << 9) | (i << 6) | (j << 3) | (kind == 'k1')]
+            if kind in ('k0', 'k1', 'k2', 'k3'):
+                return [(op << 9) | (i << 6) | (j << 3) | int(kind[1])]
             if kind == 'shl':
                 v = val if val is not None else 1
                 assert 1 <= v <= 64

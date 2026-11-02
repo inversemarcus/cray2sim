@@ -91,6 +91,18 @@ static inline uint64_t cm_read(CPU *c, uint64_t addr) {
   if (a >= c->LA || a >= mem_limit) { range_error(c); return 0; }
   return CM[a];
 }
+// Scalar references use atomic acquire/release accesses: in mt=1 mode they
+// are how processors synchronise (barrier words), so they must not race.
+static inline uint64_t cm_read_sync(CPU *c, uint64_t addr) {
+  uint64_t a = (uint64_t)c->BA + (uint32_t)addr;
+  if (a >= c->LA || a >= mem_limit) { range_error(c); return 0; }
+  return __atomic_load_n(&CM[a], __ATOMIC_ACQUIRE);
+}
+static inline void cm_write_sync(CPU *c, uint64_t addr, uint64_t v) {
+  uint64_t a = (uint64_t)c->BA + (uint32_t)addr;
+  if (a >= c->LA || a >= mem_limit) { range_error(c); return; }
+  __atomic_store_n(&CM[a], v, __ATOMIC_RELEASE);
+}
 static inline void cm_write(CPU *c, uint64_t addr, uint64_t v) {
   uint64_t a = (uint64_t)c->BA + (uint32_t)addr;
   if (a >= c->LA || a >= mem_limit) { range_error(c); return; }
@@ -121,10 +133,11 @@ static inline uint16_t parcel(CPU *c, uint32_t p) {
   return (uint16_t)(w >> (16 * (3 - (p & 3))));
 }
 
-static uint64_t fetch_time(CPU *c, uint32_t p, uint64_t t) {
+static uint64_t fetch_time(CPU *c, uint32_t p, uint64_t t, int dry) {
   uint64_t blk = ((uint64_t)c->BA * 4 + p) >> 6;  // 16 words = 64 parcels
   for (int i = 0; i < c->ibuf_n; i++)
     if (c->ibuf[i] == blk) return t;
+  if (dry) return t + T.ibuf_miss;
   if (c->ibuf_n < 8) c->ibuf[c->ibuf_n++] = blk;
   else { c->ibuf[c->ibuf_next] = blk; c->ibuf_next = (c->ibuf_next + 1) & 7; }
   c->stall_ibuf += T.ibuf_miss;
@@ -140,6 +153,9 @@ static int lzc(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
 #define NEED(x) ti = max64(ti, (x))
 #define VSRC(r) NEED(c->V_wr[r])
 #define VDST(r) do { NEED(c->V_wr[r]); NEED(c->V_rd[r]); } while (0)
+// End of an instruction's resource checks: a dry run returns its issue time
+// here, before any architectural or timing state is changed.
+#define ISSUE if (dry) return ti
 
 static void vbook(CPU *c, int unit, int lat, int dst, int s1, int s2, uint64_t ti) {
   int n = c->VL;
@@ -151,9 +167,11 @@ static void vbook(CPU *c, int unit, int lat, int dst, int s1, int s2, uint64_t t
   c->n_vec++; c->n_vec_elems += n;
 }
 
-static void step(CPU *c) {
+// Execute the next instruction of processor c, or (dry != 0) only return the
+// clock period at which it would issue, without side effects.
+static uint64_t step(CPU *c, int dry) {
   uint32_t p0 = c->P;
-  uint64_t ti = fetch_time(c, p0, c->t);
+  uint64_t ti = fetch_time(c, p0, c->t, dry);
   uint16_t w = parcel(c, p0);
   int f = w >> 9, i = (w >> 6) & 7, j = (w >> 3) & 7, k = w & 7, jk = w & 63;
   int np = 1;
@@ -173,28 +191,33 @@ static void step(CPU *c) {
   uint32_t nextP = p0 + np;
   int taken = 0;
   int n = c->VL;
-  c->n_op[f]++;
+  if (!dry) c->n_op[f]++;
+  if (!dry) cf_range_error = 0;
   switch (f) {
     case 000: case 001:  // exit / error exit
+      ISSUE;
       c->running = 0; c->exit_code = jk; c->P = nextP; c->t = ti + T.issue; c->n_inst++;
-      return;
+      return ti;
     case 002: {  // register jump (with return)
       NEED(c->A_rdy[k]);
+      ISSUE;
       uint32_t tgt = c->A[k];
       c->A[i] = nextP; c->A_rdy[i] = ti + T.a_add;
       nextP = tgt; taken = 1; break;
     }
-    case 003: nextP = m; taken = 1; break;
+    case 003: ISSUE; nextP = m; taken = 1; break;
     case 004: case 005: {
       ti += T.sema;
+      ISSUE;
       int was = __atomic_exchange_n(&semaphore, 1, __ATOMIC_SEQ_CST);
       if ((f == 004 && !was) || (f == 005 && was)) { nextP = m; taken = 1; }
       break;
     }
-    case 006: __atomic_store_n(&semaphore, 1, __ATOMIC_SEQ_CST); break;
-    case 007: __atomic_store_n(&semaphore, 0, __ATOMIC_SEQ_CST); break;
+    case 006: ISSUE; __atomic_store_n(&semaphore, 1, __ATOMIC_SEQ_CST); break;
+    case 007: ISSUE; __atomic_store_n(&semaphore, 0, __ATOMIC_SEQ_CST); break;
     case 010: case 011: case 012: case 013: {
       NEED(c->A_rdy[k]);
+      ISSUE;
       uint32_t a = c->A[k];
       int cond = f == 010 ? a == 0 : f == 011 ? a != 0 : f == 012 ? !(a >> 31) : (a >> 31);
       if (cond) { nextP = m; taken = 1; }
@@ -202,6 +225,7 @@ static void step(CPU *c) {
     }
     case 014: case 015: case 016: case 017: {
       NEED(c->S_rdy[j]);
+      ISSUE;
       uint64_t s = c->S[j];
       int cond = f == 014 ? s == 0 : f == 015 ? s != 0 : f == 016 ? !(s >> 63) : (int)(s >> 63);
       if (cond) { nextP = m; taken = 1; }
@@ -211,17 +235,19 @@ static void step(CPU *c) {
       NEED(c->A_rdy[j]); NEED(c->A_rdy[k]); NEED(c->A_rdy[i]);
       int u = f < 022 ? U_AADD : U_AMUL;
       NEED(c->unit_free[u]);
+      ISSUE;
       uint32_t a = c->A[j], b = c->A[k];
       c->A[i] = f == 020 ? a + b : f == 021 ? a - b : a * b;
       c->A_rdy[i] = ti + (u == U_AADD ? T.a_add : T.a_mul);
       break;
     }
-    case 024: NEED(c->S_rdy[j]); c->A[i] = (uint32_t)c->S[j]; c->A_rdy[i] = ti + T.a_add; break;
-    case 025: c->A[i] = c->VL & 63; c->A_rdy[i] = ti + T.a_add; break;
-    case 026: c->A[i] = jk; c->A_rdy[i] = ti + 1; break;
-    case 027: c->A[i] = 0xFFFFFFC0u | jk; c->A_rdy[i] = ti + 1; break;
+    case 024: NEED(c->S_rdy[j]); ISSUE; c->A[i] = (uint32_t)c->S[j]; c->A_rdy[i] = ti + T.a_add; break;
+    case 025: ISSUE; c->A[i] = c->VL & 63; c->A_rdy[i] = ti + T.a_add; break;
+    case 026: ISSUE; c->A[i] = jk; c->A_rdy[i] = ti + 1; break;
+    case 027: ISSUE; c->A[i] = 0xFFFFFFC0u | jk; c->A_rdy[i] = ti + 1; break;
     case 030: case 031: case 032: case 033: {
       VSRC(k); NEED(c->unit_free[U_VLOG]);
+      ISSUE;
       uint64_t vm = 0;
       for (int e = 0; e < n; e++) {
         uint64_t x = c->V[k][e];
@@ -233,23 +259,26 @@ static void step(CPU *c) {
       c->VM_rdy = ti + T.v_log + n;
       break;
     }
-    case 034: NEED(c->S_rdy[j]); c->VM = c->S[j]; c->VM_rdy = ti + 1; break;
+    case 034: NEED(c->S_rdy[j]); ISSUE; c->VM = c->S[j]; c->VM_rdy = ti + 1; break;
     case 035:
+      ISSUE;
       if (k == 0) c->halt_range = 0; else if (k == 1) c->halt_range = 1;
       else if (k == 2) c->halt_fp = 0; else if (k == 3) c->halt_fp = 1;
       break;
-    case 036: case 037: NEED(c->A_rdy[k]); c->VL = c->A[k] & 63; if (!c->VL) c->VL = 64; break;
-    case 040: c->A[i] = m & 0xffff; c->A_rdy[i] = ti + 1; break;
-    case 041: c->A[i] = 0xFFFF0000u | (m & 0xffff); c->A_rdy[i] = ti + 1; break;
-    case 042: case 043: c->A[i] = m; c->A_rdy[i] = ti + 1; break;
+    case 036: case 037: NEED(c->A_rdy[k]); ISSUE; c->VL = c->A[k] & 63; if (!c->VL) c->VL = 64; break;
+    case 040: ISSUE; c->A[i] = m & 0xffff; c->A_rdy[i] = ti + 1; break;
+    case 041: ISSUE; c->A[i] = 0xFFFF0000u | (m & 0xffff); c->A_rdy[i] = ti + 1; break;
+    case 042: case 043: ISSUE; c->A[i] = m; c->A_rdy[i] = ti + 1; break;
     case 044: case 046: case 054: case 056: {
       uint32_t addr = m;
       if (f == 046 || f == 056) { NEED(c->A_rdy[k]); addr = c->A[k]; }
       NEED(c->unit_free[U_LMP]);
+      if (f == 044 || f == 046) NEED(c->A_rdy[i]); else NEED(c->S_rdy[i]);
+      ISSUE;
       uint64_t v = c->LM[addr & (LM_WORDS - 1)];
       if (addr >= LM_WORDS) range_error(c);
-      if (f == 044 || f == 046) { NEED(c->A_rdy[i]); c->A[i] = (uint32_t)v; c->A_rdy[i] = ti + T.lm_scalar; }
-      else { NEED(c->S_rdy[i]); c->S[i] = v; c->S_rdy[i] = ti + T.lm_scalar; }
+      if (f == 044 || f == 046) { c->A[i] = (uint32_t)v; c->A_rdy[i] = ti + T.lm_scalar; }
+      else { c->S[i] = v; c->S_rdy[i] = ti + T.lm_scalar; }
       c->unit_free[U_LMP] = ti + 1; c->unit_busy[U_LMP]++;
       break;
     }
@@ -262,15 +291,16 @@ static void step(CPU *c) {
       else if (f == 055) { NEED(c->S_rdy[j]); v = c->S[j]; }
       else { NEED(c->S_rdy[i]); v = c->S[i]; }
       NEED(c->unit_free[U_LMP]);
+      ISSUE;
       if (addr >= LM_WORDS) range_error(c);
       c->LM[addr & (LM_WORDS - 1)] = v;
       c->unit_free[U_LMP] = ti + 1; c->unit_busy[U_LMP]++;
       break;
     }
-    case 050: c->S[i] = m; c->S_rdy[i] = ti + 1; break;
-    case 051: c->S[i] = 0xFFFFFFFF00000000ULL | m; c->S_rdy[i] = ti + 1; break;
-    case 052: c->S[i] = (uint64_t)m << 32; c->S_rdy[i] = ti + 1; break;
-    case 053: c->S[i] = mf; c->S_rdy[i] = ti + 1; break;
+    case 050: ISSUE; c->S[i] = m; c->S_rdy[i] = ti + 1; break;
+    case 051: ISSUE; c->S[i] = 0xFFFFFFFF00000000ULL | m; c->S_rdy[i] = ti + 1; break;
+    case 052: ISSUE; c->S[i] = (uint64_t)m << 32; c->S_rdy[i] = ti + 1; break;
+    case 053: ISSUE; c->S[i] = mf; c->S_rdy[i] = ti + 1; break;
     case 060: case 062: case 064: case 066: case 061: case 063: case 065: case 067: {
       uint32_t addr;
       int load = !(f & 1);
@@ -279,12 +309,11 @@ static void step(CPU *c) {
       else if (f == 064 || f == 065) { NEED(c->A_rdy[k]); addr = c->A[k] + m; }
       else addr = m;
       NEED(c->unit_free[U_CMP]);
-      if (load) NEED(c->S_rdy[i]); else NEED(c->S_rdy[i]);
+      NEED(c->S_rdy[i]);
+      ISSUE;
       uint64_t acc = cm_access(c, (uint64_t)c->BA + addr, ti);
-      // scalar references are acquire/release so that, with mt=1, data written
-      // before a barrier word is visible after the barrier word is observed
-      if (load) { __atomic_thread_fence(__ATOMIC_ACQUIRE); c->S[i] = cm_read(c, addr); __atomic_thread_fence(__ATOMIC_ACQUIRE); c->S_rdy[i] = acc + T.cm_load_lat; }
-      else { __atomic_thread_fence(__ATOMIC_RELEASE); cm_write(c, addr, c->S[i]); __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+      if (load) { c->S[i] = cm_read_sync(c, addr); c->S_rdy[i] = acc + T.cm_load_lat; }
+      else cm_write_sync(c, addr, c->S[i]);
       c->unit_free[U_CMP] = ti + 1; c->unit_busy[U_CMP]++; c->cm_words++;
       break;
     }
@@ -296,18 +325,20 @@ static void step(CPU *c) {
       else { NEED(c->A_rdy[k]); VSRC(vx); base = c->A[k]; }
       NEED(c->unit_free[U_CMP]);
       if (load) VDST(vr); else VSRC(vr);
+      ISSUE;
       uint64_t last = ti, req = ti;
       uint64_t tmp[64];
       for (int e = 0; e < n; e++) {
-        uint32_t off = gather ? base + (uint32_t)c->V[vx][e] : base + (uint32_t)(e * stride);
+        // gather: an index register that is also the destination reads as zeros (HR-2000 2.2.3)
+        uint32_t off = gather ? base + (uint32_t)(vx == vr && load ? 0 : c->V[vx][e]) : base + (uint32_t)(e * stride);
         uint64_t acc = cm_access(c, (uint64_t)c->BA + off, req);
         last = max64(last, acc);
         req = max64(req + (gather ? 4 : 1), acc + 1 - (gather ? 0 : 0));
         if (load) tmp[e] = cm_read(c, off);
-        else cm_write(c, off, (vr == vx && gather) ? 0 : c->V[vr][e]);
+        else cm_write(c, off, c->V[vr][e]);   // scatter: both registers are sources
       }
       if (load) {
-        for (int e = 0; e < n; e++) c->V[vr][e] = (gather && vr == vx) ? tmp[e] : tmp[e];
+        memcpy(c->V[vr], tmp, n * 8);
         c->V_wr[vr] = last + T.cm_load_lat;
       } else c->V_rd[vr] = max64(c->V_rd[vr], last);
       if (gather) c->V_rd[vx] = max64(c->V_rd[vx], last);
@@ -318,14 +349,14 @@ static void step(CPU *c) {
     }
     case 074: case 075: {
       NEED(c->A_rdy[k]); NEED(c->unit_free[U_LMP]);
+      if (f == 074) VDST(i); else VSRC(i);
+      ISSUE;
       uint32_t a = c->A[k];
       if (a + n > LM_WORDS) range_error(c);
       if (f == 074) {
-        VDST(i);
         for (int e = 0; e < n; e++) c->V[i][e] = c->LM[(a + e) & (LM_WORDS - 1)];
         c->V_wr[i] = ti + T.lm_vector + n;
       } else {
-        VSRC(i);
         for (int e = 0; e < n; e++) c->LM[(a + e) & (LM_WORDS - 1)] = c->V[i][e];
         c->V_rd[i] = max64(c->V_rd[i], ti + n);
       }
@@ -334,28 +365,32 @@ static void step(CPU *c) {
       c->n_vec++; c->n_vec_elems += n;
       break;
     }
-    case 076: case 077: case 0134: case 0135: case 0136: case 0137: break;
+    case 076: case 077: case 0134: case 0135: case 0136: case 0137: ISSUE; break;
     case 0100: case 0101: case 0102: case 0103: {
       NEED(c->S_rdy[j]); NEED(c->S_rdy[k]); NEED(c->S_rdy[i]);
+      ISSUE;
       uint64_t a = c->S[j], b = c->S[k];
       c->S[i] = f == 0100 ? a & b : f == 0101 ? a & ~b : f == 0102 ? a ^ b : a | b;
       c->S_rdy[i] = ti + T.s_log; break;
     }
     case 0104: case 0105: {
       NEED(c->S_rdy[j]); NEED(c->S_rdy[k]); NEED(c->S_rdy[i]);
+      ISSUE;
       c->S[i] = f == 0104 ? c->S[j] + c->S[k] : c->S[j] - c->S[k];
       c->S_rdy[i] = ti + T.s_int; break;
     }
     case 0106: case 0107: {
       NEED(c->S_rdy[j]); NEED(c->S_rdy[i]);
+      ISSUE;
       uint64_t x = c->S[j];
       c->S[i] = f == 0107 ? (uint64_t)lzc(x) : k == 1 ? (uint64_t)(popc(x) & 1) : (uint64_t)popc(x);
       c->S_rdy[i] = ti + T.s_int; break;
     }
-    case 0110: NEED(c->S_rdy[i]); { int sh = 64 - jk; c->S[i] = sh >= 64 ? 0 : c->S[i] << sh; } c->S_rdy[i] = ti + T.s_shift; break;
-    case 0111: NEED(c->S_rdy[i]); c->S[i] = c->S[i] >> jk; c->S_rdy[i] = ti + T.s_shift; break;
+    case 0110: NEED(c->S_rdy[i]); ISSUE; { int sh = 64 - jk; c->S[i] = sh >= 64 ? 0 : c->S[i] << sh; } c->S_rdy[i] = ti + T.s_shift; break;
+    case 0111: NEED(c->S_rdy[i]); ISSUE; c->S[i] = c->S[i] >> jk; c->S_rdy[i] = ti + T.s_shift; break;
     case 0112: case 0113: {
       NEED(c->S_rdy[i]); NEED(c->S_rdy[j]); NEED(c->A_rdy[k]);
+      ISSUE;
       uint32_t sh = c->A[k];
       unsigned __int128 F;
       if (f == 0112) {
@@ -367,10 +402,10 @@ static void step(CPU *c) {
       }
       c->S_rdy[i] = ti + T.s_shift; break;
     }
-    case 0114: NEED(c->VM_rdy); NEED(c->S_rdy[i]); c->S[i] = c->VM; c->S_rdy[i] = ti + 1; break;
-    case 0115: NEED(c->S_rdy[i]); c->S[i] = ti; c->S_rdy[i] = ti + 1; break;
-    case 0116: NEED(c->S_rdy[i]); c->S[i] = jk; c->S_rdy[i] = ti + 1; break;
-    case 0117: NEED(c->S_rdy[i]); c->S[i] = 0xFFFFFFFFFFFFFFC0ULL | jk; c->S_rdy[i] = ti + 1; break;
+    case 0114: NEED(c->VM_rdy); NEED(c->S_rdy[i]); ISSUE; c->S[i] = c->VM; c->S_rdy[i] = ti + 1; break;
+    case 0115: NEED(c->S_rdy[i]); ISSUE; c->S[i] = ti; c->S_rdy[i] = ti + 1; break;
+    case 0116: NEED(c->S_rdy[i]); ISSUE; c->S[i] = jk; c->S_rdy[i] = ti + 1; break;
+    case 0117: NEED(c->S_rdy[i]); ISSUE; c->S[i] = 0xFFFFFFFFFFFFFFC0ULL | jk; c->S_rdy[i] = ti + 1; break;
     case 0120: case 0121: case 0122: case 0123: case 0124: case 0125: case 0126: case 0127:
     case 0132: case 0133: {
       int unary = f == 0122 || f == 0123 || f == 0132 || f == 0133;
@@ -378,6 +413,7 @@ static void step(CPU *c) {
       int src1 = (f == 0122 || f == 0123) ? k : j;
       NEED(c->S_rdy[src1]); if (!unary) NEED(c->S_rdy[k]);
       NEED(c->S_rdy[i]); NEED(c->unit_free[u]);
+      ISSUE;
       uint64_t a = c->S[src1], b = c->S[k], r;
       switch (f) {
         case 0120: r = cf_add(a, b); break;
@@ -394,11 +430,15 @@ static void step(CPU *c) {
       if (f == 0132 || f == 0133) c->unit_free[u] = ti + 4;
       break;
     }
-    case 0130: NEED(c->A_rdy[k]); NEED(c->S_rdy[i]); c->S[i] = c->A[k]; c->S_rdy[i] = ti + 1; break;
-    case 0131: NEED(c->A_rdy[k]); NEED(c->S_rdy[i]); c->S[i] = (uint64_t)(int64_t)(int32_t)c->A[k]; c->S_rdy[i] = ti + 1; break;
+    case 0130: NEED(c->A_rdy[k]); NEED(c->S_rdy[i]); ISSUE; c->S[i] = c->A[k]; c->S_rdy[i] = ti + 1; break;
+    case 0131: NEED(c->A_rdy[k]); NEED(c->S_rdy[i]); ISSUE; c->S[i] = (uint64_t)(int64_t)(int32_t)c->A[k]; c->S_rdy[i] = ti + 1; break;
     default: {
       // vector register operations 140..177
-      if (f < 0140) { fprintf(stderr, "cpu%d: undefined opcode %03o at P=%o\n", c->id, f, p0); c->running = 0; c->exit_code = -1; return; }
+      if (f < 0140) {
+        ISSUE;
+        fprintf(stderr, "cpu%d: undefined opcode %03o at P=%o\n", c->id, f, p0);
+        c->running = 0; c->exit_code = -1; return ti;
+      }
       int vj_vec = 1, unit, lat, sj = 0;
       switch (f) {
         case 0140: case 0142: case 0144: case 0146: vj_vec = 0; sj = 1; unit = U_VLOG; lat = T.v_log; break;
@@ -428,6 +468,7 @@ static void step(CPU *c) {
       if (f == 0146 || f == 0147) NEED(c->VM_rdy);
       VDST(i);
       NEED(c->unit_free[unit]);
+      ISSUE;
       static const uint64_t zero[64];
       const uint64_t *vj = useVj ? (j == i ? zero : c->V[j]) : zero;
       const uint64_t *vk = useVk ? (k == i ? zero : c->V[k]) : zero;
@@ -492,18 +533,30 @@ static void step(CPU *c) {
   c->n_inst++;
   c->P = nextP;
   c->t = ti + T.issue + (np > 2 ? np - 2 : 0) * T.extra_parcel + (taken ? T.branch_taken : 0);
-  if (c->bps && c->halt_range) { c->running = 0; c->exit_code = -2; }
+  if (cf_range_error) {
+    c->bps |= 2;                                          // floating-point range error
+    if (c->halt_fp) { c->running = 0; c->exit_code = -3; }
+  }
+  if ((c->bps & 1) && c->halt_range) { c->running = 0; c->exit_code = -2; }
+  return ti;
 }
 
 // ---------------- Foreground Processor (host) protocol ----------------
+// Exact mode: always execute the instruction that issues earliest across the
+// four processors.  A processor's next issue time depends only on its own
+// state, so it is recomputed only after that processor executes.
 static void run(void) {
+  uint64_t next[NCPU];
+  for (int q = 0; q < NCPU; q++)
+    if (cpu[q].running) next[q] = step(&cpu[q], 1);
   for (;;) {
-    CPU *best = NULL;
+    int best = -1;
     for (int q = 0; q < NCPU; q++)
-      if (cpu[q].running && (!best || cpu[q].t < best->t)) best = &cpu[q];
-    if (!best) return;
-    step(best);
-    if (!best->running) return;
+      if (cpu[q].running && (best < 0 || next[q] < next[best])) best = q;
+    if (best < 0) return;
+    step(&cpu[best], 0);
+    if (!cpu[best].running) return;
+    next[best] = step(&cpu[best], 1);
   }
 }
 
@@ -542,7 +595,7 @@ static void mt_advance(void) {
 static void *mt_worker(void *arg) {
   CPU *c = &cpu[(long)arg];
   for (;;) {
-    while (c->running && c->t < mt_window) step(c);
+    while (c->running && c->t < mt_window) step(c, 0);
     bar_wait(&mt_bar);
     if (c->id == 0) mt_advance();
     bar_wait(&mt_bar);
@@ -628,42 +681,59 @@ int main(int argc, char **argv) {
   while (fgets(line, sizeof line, stdin)) {
     char cmd[32] = "";
     sscanf(line, "%31s", cmd);
-    if (!strcmp(cmd, "load")) {  // load FILE WORDADDR : raw little-endian words
-      char fn[1024]; unsigned long long at;
-      if (sscanf(line, "%*s %1023s %llu", fn, &at) != 2) { printf("ERR\n"); fflush(stdout); continue; }
+    if (!strcmp(cmd, "load")) {  // load FILE WORDADDR : raw little-endian words (FILE may contain spaces)
+      char *sp1 = strchr(line, ' '), *sp2 = strrchr(line, ' ');
+      if (!sp1 || sp2 == sp1) { printf("ERR usage: load FILE ADDR\n"); fflush(stdout); continue; }
+      char *end; unsigned long long at = strtoull(sp2 + 1, &end, 0);
+      *sp2 = 0;
+      const char *fn = sp1 + 1;
       FILE *fp = fopen(fn, "rb");
       if (!fp) { printf("ERR %s\n", strerror(errno)); fflush(stdout); continue; }
       fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
       size_t nw = sz / 8;
-      if (at + nw > CM_WORDS) { printf("ERR too big\n"); fflush(stdout); fclose(fp); continue; }
+      if (at > CM_WORDS || nw > CM_WORDS - at) { printf("ERR too big\n"); fflush(stdout); fclose(fp); continue; }
       size_t got = fread(CM + at, 8, nw, fp); fclose(fp);
       printf("OK %zu\n", got); fflush(stdout);
     } else if (!strcmp(cmd, "w")) {  // w ADDR v1 v2 ... (hex)
       char *p = line + 1; unsigned long long at = strtoull(p, &p, 0);
-      int cnt = 0;
-      for (;;) { while (*p == ' ') p++; if (*p == '\n' || !*p) break; CM[at + cnt++] = strtoull(p, &p, 16); }
-      printf("OK %d\n", cnt); fflush(stdout);
+      int cnt = 0, bad = 0;
+      for (;;) {
+        while (*p == ' ') p++;
+        if (*p == '\n' || !*p) break;
+        uint64_t v = strtoull(p, &p, 16);
+        if (at + cnt >= CM_WORDS) { bad = 1; break; }
+        CM[at + cnt++] = v;
+      }
+      if (bad) printf("ERR address\n"); else printf("OK %d\n", cnt);
+      fflush(stdout);
     } else if (!strcmp(cmd, "r")) {  // r ADDR N (hex output)
-      unsigned long long at, nn;
-      sscanf(line, "%*s %llu %llu", &at, &nn);
+      unsigned long long at = 0, nn = 0;
+      if (sscanf(line, "%*s %llu %llu", &at, &nn) != 2 || at > CM_WORDS || nn > CM_WORDS - at) {
+        printf("ERR address\n"); fflush(stdout); continue;
+      }
       printf("DATA");
       for (unsigned long long q = 0; q < nn; q++) printf(" %llx", (unsigned long long)CM[at + q]);
       printf("\n"); fflush(stdout);
     } else if (!strcmp(cmd, "dump")) {  // dump ADDR N FILE
-      unsigned long long at, nn; char fn[1024];
-      sscanf(line, "%*s %llu %llu %1023s", &at, &nn, fn);
-      FILE *fp = fopen(fn, "wb"); fwrite(CM + at, 8, nn, fp); fclose(fp);
+      unsigned long long at = 0, nn = 0; char fn[1024];
+      if (sscanf(line, "%*s %llu %llu %1023[^\n]", &at, &nn, fn) != 3 || at > CM_WORDS || nn > CM_WORDS - at) {
+        printf("ERR usage: dump ADDR N FILE\n"); fflush(stdout); continue;
+      }
+      FILE *fp = fopen(fn, "wb");
+      if (!fp) { printf("ERR %s\n", strerror(errno)); fflush(stdout); continue; }
+      fwrite(CM + at, 8, nn, fp); fclose(fp);
       printf("OK\n"); fflush(stdout);
     } else if (!strcmp(cmd, "start")) {  // start CPU PARCEL_ADDR : fresh start (registers cleared, S7=cpu)
-      int q; unsigned long long pa;
-      sscanf(line, "%*s %d %llu", &q, &pa);
+      int q = -1; unsigned long long pa = 0;
+      if (sscanf(line, "%*s %d %llu", &q, &pa) != 2 || q < 0 || q >= NCPU) { printf("ERR usage: start CPU PARCEL\n"); fflush(stdout); continue; }
       CPU *c = &cpu[q];
       memset(c->A, 0, sizeof c->A); memset(c->S, 0, sizeof c->S);
       c->S[7] = q; c->A[7] = q; c->P = (uint32_t)pa; c->running = 1; c->exit_code = 1000;
       c->t = max64(c->t, now());
       printf("OK\n"); fflush(stdout);
     } else if (!strcmp(cmd, "resume")) {  // resume CPU : continue after exit
-      int q; sscanf(line, "%*s %d", &q);
+      int q = -1;
+      if (sscanf(line, "%*s %d", &q) != 1 || q < 0 || q >= NCPU) { printf("ERR usage: resume CPU\n"); fflush(stdout); continue; }
       cpu[q].running = 1; cpu[q].exit_code = 1000; cpu[q].t = max64(cpu[q].t, now());
       printf("OK\n"); fflush(stdout);
     } else if (!strcmp(cmd, "go")) {  // run until any CPU exits (or all idle)
@@ -674,7 +744,9 @@ int main(int argc, char **argv) {
       if (!any) printf("IDLE %llu\n", (unsigned long long)now());
       printf("END\n"); fflush(stdout);
     } else if (!strcmp(cmd, "regs")) {  // regs CPU : one line, V regs first 2 elements
-      int q; sscanf(line, "%*s %d", &q); CPU *c = &cpu[q];
+      int q = -1;
+      if (sscanf(line, "%*s %d", &q) != 1 || q < 0 || q >= NCPU) { printf("ERR usage: regs CPU\n"); fflush(stdout); continue; }
+      CPU *c = &cpu[q];
       printf("REGS VL=%d VM=%llx", c->VL, (unsigned long long)c->VM);
       for (int r = 0; r < 8; r++) printf(" V%d=%llx,%llx", r, (unsigned long long)c->V[r][0], (unsigned long long)c->V[r][1]);
       printf("\n"); fflush(stdout);

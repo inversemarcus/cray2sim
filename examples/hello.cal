@@ -1,0 +1,24 @@
+; hello.cal: a small tour of CRAY-2 instructions (used by tests/test_asm.py)
+        A1 0x1000          ; source vector (word address)
+        A2 1
+        A3 64
+        VL A3
+        V1 (A1,A2)          ; load 64 words
+        S1 0xff
+        V2 S1&V1            ; low byte
+        V3 PV2              ; popcount
+        V4 V3+V1            ; integer add
+        A4 0x2000
+        (A4,A2) V4
+        A5 10
+        S2 0
+        S3 1
+loop:   S2 S2+S3
+        A6 1
+        A5 A5-A6
+        JN A5,loop
+        S4 0x4001C00000000000   ; 1.5
+        S5 S4*FS4
+        S6 S4+FS5
+        (A4) S6                ; overwrite element 0 with 1.5 + 2.25
+        EXIT 7

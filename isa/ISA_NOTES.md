@@ -99,31 +99,14 @@ From 2.1.3 (lines 744-766, pp.2-3/2-4) and Section 3 (lines 1834-1940):
 
 ## Common Memory (Section 4)
 
-The quoted paragraphs below are from Cray Research, *CRAY-2 Computer System Functional Description* (HR-2000, May 1985), pp. 4-1 to 4-3, checked visually against the PDF.
+Summary of HR-2000 (May 1985) Section 4, pp. 4-1 to 4-3, in our words:
 
-> Common Memory contains 256 million words of dynamic memory. The dynamic memory consists of 128 banks with 2 million words in each bank. Each 72-bit word consists of 64-data bits and 8 error correction bits.
->
-> Common Memory is organized into quadrants with 32 banks in each quadrant. Each memory quadrant has a data path to each of four Common Memory ports. A Background Processor and a foreground communication channel are connected to each Common Memory port. Total memory bandwidth is 64 gigabits per second. Total memory capacity is 17 gigabits.
-
-(The OCR text reads "12-bit" and "11 gigabits"; the PDF says 72-bit and 17 gigabits.)
-
-> 4.1 MEMORY ADDRESSING — A word in memory is addressed by 32 bits. The low-order 2 bits select the quadrants and the next 5 bits select the bank. [Figure 4-1: bits 2^31..2^7 Bank Address, 2^6..2^2 Bank Select, 2^1..2^0 Quad Select]
->
-> 4.2 MEMORY ACCESS — The Background Processors are locked into a phased access time scheme with the memory quadrants through the Common Memory ports. Through its Common Memory port, a Background Processor can access any given quadrant but only in the processor's own phase time, that is, every fourth clock period (CP). If a Background Processor requests a quadrant out of its phase time, the request is delayed until the correct time.
->
-> For example, assume the Background Processors are A through D, and the quadrants are 0 through 3. Also assume processor A is locked into quadrant 0 at phase time 0. If processor A references quadrant 0 at phase time 1, it must wait until the next phase time 0 (CP 4) to have access to memory in that quadrant.
->
-> Memory banks in a quadrant share a data path to each Common Memory port. Because of the phased access time between the quadrants and the Common Memory ports, however, only one bank accesses the path in a given 4-CP time slot. Because two banks never compete for the same data path in the same time slot, each bank functionally has an independent path to each of the four Common Memory ports.
->
-> 4.3 MEMORY CONFLICTS — To prevent memory conflicts, each memory bank has a Bank Busy flag. If the bank is busy, the quadrant sends a rejected signal to the requesting memory port. The requesting port retries the data.
->
-> 4.4 MEMORY BACKUP — Memory backup occurs when too many memory references arrive at a single memory quadrant. Each Common Memory port has four quadrant buffers, one for each quadrant, each buffer can hold two memory references for its memory quadrant. Therefore, references can continue to the memory port when the reference is not in the proper phase time. When a quadrant buffer in a memory port is filled, and another reference to that quadrant is made, the memory port begins a backup procedure.
->
-> The memory port backup procedure stops instruction issue for the associated Background Processor if that processor is making a memory reference. Vector streams initiated in the Background Processor and associated with a Common Memory reference are held.
->
-> After all references have been submitted for retry, a stop issue is released allowing additional references to issue. A conflict during the retry process causes the backup procedure to begin again at the point the conflict occurred; which could be the original backup references or additional new references filling buffer positions that became empty during retry.
->
-> NOTE — A special timing problem exists for execution of Background Processor instruction 072 (the gather instruction). This instruction allows addresses in any sequence with respect to the low-order 2 bits, quadrant select. Without special treatment of this instruction, the data could arrive at the Vector Destination register out of order. Therefore, the hardware forces a maximum memory reference pattern of four references and 12 null references which averages to one reference every 4 clock periods.
+- **Size and organization.** 256 Mwords in 128 banks of 2 Mwords. Each word is 64 data bits plus 8 error-correction bits. The banks form 4 quadrants of 32. Each quadrant has a data path to each of the 4 Common Memory ports, and each port serves one Background Processor and one foreground channel.
+- **4.1 Addressing.** Addresses are 32 bits. The low 2 bits select the quadrant and the next 5 the bank.
+- **4.2 Access.** Each processor reaches a given quadrant only in its own phase, every fourth clock period; a request out of phase waits for the next one. Because of the phasing, at most one bank of a quadrant uses a port's path in any 4-CP slot, so in effect every bank has its own path to every port.
+- **4.3 Conflicts.** Each bank has a Bank Busy flag. A reference to a busy bank is rejected and the port retries it.
+- **4.4 Backup.** Each port has a two-reference buffer per quadrant, so references can be accepted out of phase. When a buffer is full and another reference to that quadrant arrives, the port starts a backup procedure: it stops instruction issue on that processor (if it is making a memory reference) and holds its memory vector streams until all references have been resubmitted. A conflict during the retry restarts the procedure.
+- **Gather (072).** Because gather addresses can come in any quadrant order, the hardware limits gather to a pattern of four references and twelve null slots, "one reference every 4 clock periods" on average, so data arrives in order.
 
 Sources: lines 4920-5036, pp.4-1..4-3. SECDED is described in 4.5 (lines 5041-5126).
 

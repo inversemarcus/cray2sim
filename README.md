@@ -109,7 +109,7 @@ All code here was written for this project from the CRAY-2 documentation.
 ## License
 
 MIT, for the code and our own documentation. The CRAY-2 manuals are Cray
-Research documents and are not redistributed here. `isa/ISA_NOTES.md` includes
-short passages quoted from HR-2000, marked as quotations and attributed, for
-reference and commentary. A public scan of HR-2000 is at
+Research documents and are not redistributed here. `isa/ISA_NOTES.md`
+summarizes them in our own words with page references, quoting only a few
+short phrases. A public scan of HR-2000 is at
 <https://www.mrynet.com/cray/HR-2000-CRAY_2_Computer_System_Functional_Description-May_1985.OCR.pdf>.

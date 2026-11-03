@@ -73,6 +73,6 @@ that synchronise through the semaphore and scalar memory words, as real CRAY-2
 programs must, compute the same results as in the default mode; the model
 programs in cray2-llm produced bit-identical outputs in both modes in our
 tests.
-Clock counts read slightly low (about 0.8% on a bank-heavy workload) and vary
+Clock counts read slightly low (about 0.9% on a bank-heavy workload) and vary
 a little from run to run. Use the default single-threaded mode for timing.
 

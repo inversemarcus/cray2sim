@@ -98,6 +98,13 @@ assumption in `docs/TIMING.md` and can be overridden on the command line.
 [cray2-llm](../cray2-llm) runs an 8-billion-parameter language model on this
 emulator at about 4 seconds of CRAY-2 time per token.
 
+## Provenance
+
+All code here was written for this project from the CRAY-2 documentation.
+Andras Tantos's [cray-sim](https://github.com/andrastantos/cray-sim), an
+X-MP/Y-MP emulator, was consulted as a reference for how Cray floating point is
+usually emulated. No code was copied from it.
+
 ## License
 
 MIT, for the code and our own documentation. The CRAY-2 manuals are Cray

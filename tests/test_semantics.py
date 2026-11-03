@@ -19,12 +19,14 @@ def run(programs, mem=(), args=()):
     s = Sim(args)
     with tempfile.TemporaryDirectory() as d:
         starts = {}
-        for n, (cpu, src) in enumerate(sorted(programs.items())):
+        # load highest addresses first: each image starts with BSSZ padding so
+        # its labels are assembled at the address where it is loaded
+        for n, (cpu, src) in reversed(list(enumerate(sorted(programs.items())))):
             base = 0x10000 * (n + 1)                 # word address
             path, out = os.path.join(d, 'p%d.cal' % cpu), os.path.join(d, 'p%d.bin' % cpu)
-            open(path, 'w').write(src)
+            open(path, 'w').write('        BSSZ %d\n' % base + src)
             cal2.assemble_file(path, out)
-            s.cmd('load %s %d' % (out, base))
+            s.cmd('load %s 0' % out)
             starts[cpu] = base * 4                    # parcel address
         for addr, vals in mem:
             s.write(addr, vals)
@@ -137,6 +139,35 @@ def main():
     r = s.read(0x8000, 3); s.close()
     want = [float_to_cray(3.5), float_to_cray(1.5), float_to_cray(2.5)]
     check('float add/multiply/subtract exact values', r == want, str([hex(x) for x in r]))
+    # four-processor barrier: each processor adds its number+1 to a shared
+    # counter under the semaphore lock, waits until all four have arrived,
+    # then reads the total (1+2+3+4 = 10).  Run in exact and fast (mt) modes.
+    barrier = '''
+lock:   JSS lock
+        S1 (0x9000)
+        S2 A7
+        S3 1
+        S2 S2+S3
+        S1 S1+S2
+        (0x9000) S1
+        S4 (0x9001)
+        S4 S4+S3
+        (0x9001) S4
+        CSM
+wait:   S4 (0x9001)
+        S5 4
+        S5 S4-S5
+        JM S5,wait
+        S6 (0x9000)
+        A1 0x9010
+        A1 A1+A7
+        (A1) S6
+        EXIT 1
+'''
+    for args in ((), ('mt=1', 'qwin=50')):
+        s_, ex = run({c: barrier for c in range(4)}, args=args)
+        r = s_.read(0x9010, 4); s_.close()
+        check('4-processor semaphore barrier %s' % (' '.join(args) or 'exact'), r == [10] * 4 and len(ex) == 4, str(r))
     sys.exit(1 if FAIL else 0)
 
 

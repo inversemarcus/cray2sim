@@ -7,8 +7,7 @@ Version 2 syntax, and the instruction set as machine-readable data with
 citations.
 
 The CRAY-2 was the fastest computer in the world when it shipped in 1985. As
-far as we know there was no runnable emulator of it. Existing Cray emulators
-cover the CRAY-1/X-MP/Y-MP family, whose instruction set is quite different.
+far as we know there was no runnable emulator of it.
 
 ```
 $ make && make test
@@ -101,9 +100,6 @@ emulator at about 4 seconds of CRAY-2 time per token.
 ## Provenance
 
 All code here was written for this project from the CRAY-2 documentation.
-Andras Tantos's [cray-sim](https://github.com/andrastantos/cray-sim), an
-X-MP/Y-MP emulator, was consulted as a reference for how Cray floating point is
-usually emulated. No code was copied from it.
 
 ## License
 

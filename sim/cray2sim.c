@@ -64,6 +64,7 @@ typedef struct {
   uint64_t t;  // earliest next issue
   uint64_t A_rdy[8], S_rdy[8], V_wr[8], V_rd[8], VM_rdy;
   uint64_t cm_drain;  // when this processor's last Common Memory reference has been accepted
+  uint64_t held;      // mt mode: issue time of a semaphore instruction deferred to a later window
   uint64_t unit_free[NUNIT];
   uint64_t ibuf[8];
   int ibuf_n, ibuf_next;
@@ -74,6 +75,8 @@ typedef struct {
 static uint64_t *CM;
 static uint64_t bank_free[NBANK];
 static int semaphore;  // single job semaphore flag
+static uint64_t sem_time;  // clock period of the last semaphore operation
+static pthread_mutex_t sem_lock = PTHREAD_MUTEX_INITIALIZER;
 // Fast multithreaded mode (mt=1): one host thread per Background Processor,
 // synchronised every QWIN clock periods of emulated time.  Within a window a
 // processor sees other processors' bank-busy times as of the window start.
@@ -209,20 +212,26 @@ static uint64_t step(CPU *c, int dry) {
       nextP = tgt; taken = 1; break;
     }
     case 003: ISSUE; nextP = m; taken = 1; break;
-    case 004: case 005: {
-      ti += T.sema;
-      ISSUE;
-      int was = __atomic_exchange_n(&semaphore, 1, __ATOMIC_SEQ_CST);
+    case 004: case 005: case 006: case 007: {
+      if (f == 007) {
+        // HR-2000 3.2: the semaphore is released, and the following instruction
+        // issues, only once the Common Memory quadrant buffers are clear, so
+        // earlier stores are complete before another processor can proceed.
+        NEED(c->cm_drain); NEED(c->unit_free[U_CMP]);
+      }
+      // Semaphore operations take effect in clock order across processors: in
+      // multithreaded mode none may issue before the last change of the flag.
+      if (!dry) pthread_mutex_lock(&sem_lock);
+      NEED(sem_time);
+      if (f <= 005) ti += T.sema;
+      if (dry) return ti;
+      int was = semaphore;
+      semaphore = f != 007;
       if ((f == 004 && !was) || (f == 005 && was)) { nextP = m; taken = 1; }
+      if (ti > sem_time) sem_time = ti;
+      pthread_mutex_unlock(&sem_lock);
       break;
     }
-    case 006: ISSUE; __atomic_store_n(&semaphore, 1, __ATOMIC_SEQ_CST); break;
-    case 007:
-      // HR-2000 3.2: the semaphore is released, and the following instruction
-      // issues, only once the Common Memory quadrant buffers are clear, so
-      // earlier stores are complete before another processor can proceed.
-      NEED(c->cm_drain); NEED(c->unit_free[U_CMP]);
-      ISSUE; __atomic_store_n(&semaphore, 0, __ATOMIC_SEQ_CST); break;
     case 010: case 011: case 012: case 013: {
       NEED(c->A_rdy[k]);
       ISSUE;
@@ -254,7 +263,7 @@ static uint64_t step(CPU *c, int dry) {
     case 026: NEED(c->A_rdy[i]); ISSUE; c->A[i] = jk; c->A_rdy[i] = ti + 1; break;
     case 027: NEED(c->A_rdy[i]); ISSUE; c->A[i] = 0xFFFFFFC0u | jk; c->A_rdy[i] = ti + 1; break;
     case 030: case 031: case 032: case 033: {
-      VSRC(k); NEED(c->unit_free[U_VLOG]);
+      VSRC(k); NEED(c->unit_free[U_VLOG]); NEED(c->VM_rdy);
       ISSUE;
       uint64_t vm = 0;
       for (int e = 0; e < n; e++) {
@@ -589,7 +598,7 @@ static void mt_advance(void) {
   int any_running = 0, any_exit = 0;
   uint64_t tmin = ~0ULL;
   for (int q = 0; q < NCPU; q++) {
-    if (cpu[q].running) { any_running = 1; tmin = cpu[q].t < tmin ? cpu[q].t : tmin; }
+    if (cpu[q].running) { any_running = 1; uint64_t tq = max64(cpu[q].t, cpu[q].held); tmin = tq < tmin ? tq : tmin; }
     else if (cpu[q].exit_code != 1000) any_exit = 1;
   }
   if (!any_running || any_exit) { mt_stop = 1; return; }
@@ -605,7 +614,18 @@ static void mt_advance(void) {
 static void *mt_worker(void *arg) {
   CPU *c = &cpu[(long)arg];
   for (;;) {
-    while (c->running && c->t < mt_window) step(c, 0);
+    while (c->running && c->t < mt_window) {
+      // A semaphore instruction must not take effect before its own issue
+      // time (CSM can wait thousands of CP for stores to drain), so it runs
+      // only in the window that contains that time.
+      int f = parcel(c, c->P) >> 9;
+      if (f >= 004 && f <= 007) {
+        uint64_t ti = step(c, 1);
+        if (ti >= mt_window) { c->held = ti; break; }
+      }
+      c->held = 0;
+      step(c, 0);
+    }
     bar_wait(&mt_bar);
     if (c->id == 0) mt_advance();
     bar_wait(&mt_bar);
@@ -689,6 +709,12 @@ int main(int argc, char **argv) {
   char line[4096];
   printf("READY cray2sim 4cpu %u words\n", CM_WORDS); fflush(stdout);
   while (fgets(line, sizeof line, stdin)) {
+    // a line that does not fit is consumed in full and rejected
+    int line_ok = strchr(line, '\n') || feof(stdin);
+    if (!line_ok) {
+      int ch; while ((ch = getchar()) != EOF && ch != '\n') { }
+      printf("ERR line too long\n"); fflush(stdout); continue;
+    }
     char cmd[32] = "";
     sscanf(line, "%31s", cmd);
     if (!strcmp(cmd, "load")) {  // load FILE WORDADDR : raw little-endian words (FILE may contain spaces)
@@ -706,14 +732,16 @@ int main(int argc, char **argv) {
       printf("OK %zu\n", got); fflush(stdout);
     } else if (!strcmp(cmd, "w")) {  // w ADDR v1 v2 ... (hex)
       // parse and check every value before writing any, so a bad line changes nothing
-      char *p = line + 1, *e; unsigned long long at = strtoull(p, &e, 0);
+      char *p = line + 1, *e; errno = 0; unsigned long long at = strtoull(p, &e, 0);
       static uint64_t vals[CM_WORDS < 65536 ? CM_WORDS : 65536];
-      int cnt = 0; const char *err = e == p ? "ERR address" : NULL;
+      int cnt = 0;
+      const char *err = e == p || errno || (*e != ' ' && *e != '\n' && *e) ? "ERR address" : NULL;
       for (p = e; !err;) {
         while (*p == ' ') p++;
         if (*p == '\n' || !*p) break;
+        errno = 0;
         uint64_t v = strtoull(p, &e, 16);
-        if (e == p || (*e && *e != ' ' && *e != '\n')) err = "ERR value";
+        if (e == p || errno || (*e && *e != ' ' && *e != '\n')) err = "ERR value";
         else if (cnt == (int)(sizeof vals / sizeof *vals)) err = "ERR too many values";
         else if (at + cnt >= CM_WORDS) err = "ERR address";
         else vals[cnt++] = v;
@@ -744,13 +772,13 @@ int main(int argc, char **argv) {
       if (sscanf(line, "%*s %d %llu", &q, &pa) != 2 || q < 0 || q >= NCPU) { printf("ERR usage: start CPU PARCEL\n"); fflush(stdout); continue; }
       CPU *c = &cpu[q];
       memset(c->A, 0, sizeof c->A); memset(c->S, 0, sizeof c->S);
-      c->S[7] = q; c->A[7] = q; c->P = (uint32_t)pa; c->running = 1; c->exit_code = 1000;
+      c->S[7] = q; c->A[7] = q; c->P = (uint32_t)pa; c->running = 1; c->exit_code = 1000; c->held = 0;
       c->t = max64(c->t, now());
       printf("OK\n"); fflush(stdout);
     } else if (!strcmp(cmd, "resume")) {  // resume CPU : continue after exit
       int q = -1;
       if (sscanf(line, "%*s %d", &q) != 1 || q < 0 || q >= NCPU) { printf("ERR usage: resume CPU\n"); fflush(stdout); continue; }
-      cpu[q].running = 1; cpu[q].exit_code = 1000; cpu[q].t = max64(cpu[q].t, now());
+      cpu[q].running = 1; cpu[q].exit_code = 1000; cpu[q].held = 0; cpu[q].t = max64(cpu[q].t, now());
       printf("OK\n"); fflush(stdout);
     } else if (!strcmp(cmd, "go")) {  // run until any CPU exits (or all idle)
       if (mt) run_mt(); else run();

@@ -232,6 +232,68 @@ wait:   S4 (0x9001)
 """})
     r = s.read(0x8300, 2); s.close()
     check('CSM waits for outstanding stores', r[1] - r[0] >= 63 * 57, str(r))
+    # more malformed writes: bad address token, overflowing value, overlong line
+    s = Sim(())
+    s.write(0x100, [5, 6])
+    bad = ['w 256a 7', 'w 256 10000000000000000', 'w 256 ' + '1 ' * 2100 + 'nope']
+    try:
+        rs = [s.cmd(c) for c in bad]
+        mem = s.read(0x100, 2)
+    except Exception as x:          # an emulator that loses protocol sync fails here
+        rs, mem = [repr(x)], None
+    check('malformed writes rejected (address, overflow, length)',
+          all(r.startswith('ERR') for r in rs) and mem == [5, 6], '%s %s' % (rs, mem))
+    s.close()
+
+    # VM is reserved until a vector compare's result is complete: a second
+    # compare (on another register) waits for it
+    s, ex = run({0: """
+        A1 0
+        VL A1
+        S1 RT
+        VM V1,Z
+        VM V2,Z
+        S2 VM
+        S3 RT
+        (0x8400) S1
+        (0x8401) S3
+        EXIT 1
+"""})
+    r = s.read(0x8400, 2); s.close()
+    check('second vector compare waits for VM', r[1] - r[0] >= 2 * (22 + 64), str(r))
+
+    # CSM in fast mode: another processor cannot take the semaphore before the
+    # releasing processor's stores have drained (same as exact mode)
+    for args in ((), ('mt=1', 'qwin=50'), ('mt=1', 'qwin=2000')):
+        s, ex = run({0: """
+        SSM
+        A1 0
+        VL A1
+        A2 0x9100
+        A3 0
+        (A2,A3) V1
+        CSM
+        S1 RT
+        (0x8500) S1
+        EXIT 1
+""", 1: """
+        S2 %d
+        S3 S2*FS2           ; delay so that CPU0 sets the semaphore first
+        S3 S3*FS2
+        S3 S3*FS2
+        S3 S3*FS2
+        S3 S3*FS2
+        S3 S3*FS2
+        S4 S3
+wait:   JCS got
+        J wait
+got:    S1 RT
+        (0x8501) S1
+        CSM
+        EXIT 1
+""" % float_to_cray(1.0)}, args=args)
+        r = s.read(0x8500, 2); s.close()
+        check('CSM drain orders the semaphore %s' % (' '.join(args) or 'exact'), r[1] >= r[0] - 10 and r[0] > 3000, str(r))
     sys.exit(1 if FAIL else 0)
 
 

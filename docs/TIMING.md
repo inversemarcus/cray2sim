@@ -71,11 +71,15 @@ without synchronising, can see it slightly early.
 `cray2sim mt=1 [qwin=N]` runs each Background Processor on its own host thread,
 synchronised every N clock periods (default 2,000). Within a window a
 processor sees other processors' bank-busy times as of the window start, so
-cross-processor bank conflicts inside a window are missed. Scalar Common Memory references are atomic acquire/release accesses. Programs
+cross-processor bank conflicts inside a window are missed. Scalar Common
+Memory references are atomic acquire/release accesses. Semaphore instructions
+are serialized and take effect in clock order: none issues before the clock
+period of the last semaphore operation, and a processor runs one only in the
+window containing its issue time. Programs
 that synchronise through the semaphore and scalar memory words, as real CRAY-2
 programs must, compute the same results as in the default mode; the model
 programs in cray2-llm produced bit-identical outputs in both modes in our
 tests.
-Clock counts read slightly low (about 0.9% on a bank-heavy workload) and vary
+Clock counts read low (by about 1% and 6% on the two cray2-llm model families) and vary
 a little from run to run. Use the default single-threaded mode for timing.
 

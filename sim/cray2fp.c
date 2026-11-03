@@ -137,7 +137,10 @@ uint64_t cf_recip_iter(uint64_t a, uint64_t b) {
 
 uint64_t cf_rsqrt_approx(uint64_t a) {
   int ea = cf_exp(a);
-  if (ea >= CF_EXPOVF || (a >> 63) || ea <= 3 || !cf_coef(a)) return ovf(060004);
+  // HR-2000 p.2-19: overflow exponent and negative operands are errors; an
+  // exponent of 0-3 also gives the overflow result but raises no error.
+  if (ea >= CF_EXPOVF || (a >> 63)) return ovf(060004);
+  if (ea <= 3 || !cf_coef(a)) return (uint64_t)060004 << 48;
   uint64_t c = cf_coef(a);
   int sh = 0;
   while (!(c >> 47)) { c <<= 1; sh++; }

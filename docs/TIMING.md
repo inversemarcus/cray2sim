@@ -13,6 +13,8 @@ overridden on the `cray2sim` command line (`name=value`) for sensitivity runs.
 | 4 Background Processors, each with its own clock; real-time clock readable by 115 | HR-2000 §2.1.2 |
 | In-order issue; an instruction waits in the issue position until its registers and functional unit are free | HR-2000 §2.1.1 |
 | No chaining: a vector result register is reserved until the whole result is written | HR-2000 §2.2.3; Simmons & Wasserman 1988 §2.1 |
+| Source vector registers are reserved too: a register being read by one stream cannot be read or written by another until that stream has read it | HR-2000 §2.2.3 ("reserves the V registers that are involved") |
+| A scalar or address result register with a write pending holds up the next instruction that writes it | HR-2000 §2.1.1 (reservation flags checked at issue) |
 | One functional unit of each type serves vector instructions and is reserved for the whole stream | HR-2000 §2.4 |
 | One result per CP per functional unit | HR-2000 §2.4 |
 | A vector register that is both destination and source reads as zeros | HR-2000 §2.2.3 (implemented functionally) |
@@ -22,6 +24,7 @@ overridden on the `cray2sim` command line (`name=value`) for sensitivity runs.
 | Gather (072) forced to 4 references per 16 CP | HR-2000 §4 note |
 | 8 instruction-buffer fields of 16 words, oldest field replaced on a miss | HR-2000 §2.1.1 |
 | One semaphore flag per job; 004/005/006/007 test, set and clear it | HR-2000 §2.1.3 and §3 |
+| Clear Semaphore (007) takes effect, and the next instruction issues, only when this processor's Common Memory references have drained | HR-2000 §3, instruction 007 |
 
 ## Numeric parameters
 

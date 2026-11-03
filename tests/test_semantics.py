@@ -168,6 +168,70 @@ wait:   S4 (0x9001)
         s_, ex = run({c: barrier for c in range(4)}, args=args)
         r = s_.read(0x9010, 4); s_.close()
         check('4-processor semaphore barrier %s' % (' '.join(args) or 'exact'), r == [10] * 4 and len(ex) == 4, str(r))
+    # malformed protocol write: rejected without changing memory
+    s = Sim(())
+    s.write(0x100, [5, 6])
+    r = s.cmd('w 256 7 nope')
+    check('malformed write rejected, memory unchanged', r.startswith('ERR') and s.read(0x100, 2) == [5, 6],
+          '%s %s' % (r, s.read(0x100, 2)))
+    s.close()
+
+    # bare EXIT is a normal exit (code 1), not an error exit
+    s, ex = run({0: """
+        EXIT
+"""})
+    s.close()
+    check('bare EXIT exits with code 1', ex.get(0, (None,))[0] == 1, str(ex.get(0)))
+
+    # reciprocal square root of an operand with exponent 0-3: overflow result,
+    # but no error (HR-2000 p.2-19), so EFI does not halt
+    s, ex = run({0: """
+        EFI
+        S1 0x0001800000000000   ; exponent 1
+        S2 *QS1
+        (0x8100) S2
+        EXIT 5
+"""})
+    r = s.read(0x8100, 1); s.close()
+    check('rsqrt of exponent 0-3: overflow result, no error', ex.get(0, (None,))[0] == 5 and r[0] >> 48 == 0o60004,
+          '%s %s' % (ex.get(0), [oct(x >> 48) for x in r]))
+
+    # a vector register being read by one stream cannot start another stream
+    # (HR-2000 2.2.3: the issue logic reserves source registers too).  Two
+    # 64-element operations on different units both reading V1 must start at
+    # least 64 clock periods apart.
+    s, ex = run({0: """
+        A1 0
+        VL A1               ; VL = 64
+        S2 RT
+        V3 V1&V4
+        V5 V1+FV6
+        S3 RT
+        (0x8200) S2
+        (0x8201) S3
+        EXIT 1
+"""})
+    r = s.read(0x8200, 2); s.close()
+    check('second reader of a vector register waits', r[1] - r[0] >= 64, str(r))
+
+    # CSM: the following instruction waits until Common Memory stores drain
+    # (HR-2000 p.3-9).  A zero-stride 64-element store keeps one bank busy for
+    # about 64 bank cycles; RT after CSM must read a time after that.
+    s, ex = run({0: """
+        A1 0
+        VL A1
+        A2 0x9100
+        A3 0
+        S1 RT
+        (A2,A3) V1
+        CSM
+        S2 RT
+        (0x8300) S1
+        (0x8301) S2
+        EXIT 1
+"""})
+    r = s.read(0x8300, 2); s.close()
+    check('CSM waits for outstanding stores', r[1] - r[0] >= 63 * 57, str(r))
     sys.exit(1 if FAIL else 0)
 
 

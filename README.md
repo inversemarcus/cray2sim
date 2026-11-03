@@ -79,8 +79,13 @@ assumption in `docs/TIMING.md` and can be overridden on the command line.
 - **Checked only against the documentation.** No CRAY-2 survives in working
   order to compare against.
 - **Unpublished approximation tables.** The reciprocal and reciprocal-sqrt
-  approximation tables were never published. The emulator models them as a
-  12-bit table plus the documented interpolation step, about 30 bits.
+  approximation tables were never published. The emulator models the
+  reciprocal as a 12-bit table plus the documented interpolation step, and the
+  reciprocal square root as the exact value truncated to 30 bits.
+- **FIX rounding is an assumption.** The emulator rounds floating-to-integer
+  conversion to nearest (half up on magnitude). The 1985 manual's add-unit rule
+  suggests rounding; a 1982 design document suggests truncation. See
+  [isa/ISA_NOTES.md](isa/ISA_NOTES.md).
 - **Iteration instructions are approximated.** The iteration instructions
   (126/127, 156/157) are modelled as an ordinary truncated multiply followed
   by a subtraction. The real hardware folds the constant into a special

@@ -21,9 +21,12 @@
 //  * add: the alignment-shifted coefficient is "rounded up": we keep one bit
 //    below the LSB and add it back (round half up on magnitude);
 //  * the reciprocal / reciprocal-square-root approximation tables are not
-//    published; we model them as a 12-bit-indexed table followed by one
-//    documented linear-interpolation step, giving ~24-bit "half precision"
-//    results (the manual says the iteration instruction then yields 46 bits).
+//    published.  Reciprocal: a 12-bit-indexed table followed by the documented
+//    interpolation step.  Reciprocal square root: the exact value truncated to
+//    30 bits.  Both are about 30 bits, and the manual says one iteration
+//    instruction then gives 46 bits.
+//  * FIX (122/174) rounds the magnitude half up, following the add unit's
+//    rounding of the shifted coefficient; see isa/ISA_NOTES.md.
 #pragma once
 #include <stdint.h>
 

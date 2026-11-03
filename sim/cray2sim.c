@@ -63,6 +63,7 @@ typedef struct {
   // timing
   uint64_t t;  // earliest next issue
   uint64_t A_rdy[8], S_rdy[8], V_wr[8], V_rd[8], VM_rdy;
+  uint64_t cm_drain;  // when this processor's last Common Memory reference has been accepted
   uint64_t unit_free[NUNIT];
   uint64_t ibuf[8];
   int ibuf_n, ibuf_next;
@@ -151,7 +152,9 @@ static int lzc(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
 // Each case computes the issue time `ti` from resource readiness, performs
 // the operation functionally, then books resources.
 #define NEED(x) ti = max64(ti, (x))
-#define VSRC(r) NEED(c->V_wr[r])
+// The issue logic reserves every V register an operation uses, sources
+// included (HR-2000 2.2.3), so a register being read cannot start another stream.
+#define VSRC(r) do { NEED(c->V_wr[r]); NEED(c->V_rd[r]); } while (0)
 #define VDST(r) do { NEED(c->V_wr[r]); NEED(c->V_rd[r]); } while (0)
 // End of an instruction's resource checks: a dry run returns its issue time
 // here, before any architectural or timing state is changed.
@@ -199,7 +202,7 @@ static uint64_t step(CPU *c, int dry) {
       c->running = 0; c->exit_code = jk; c->P = nextP; c->t = ti + T.issue; c->n_inst++;
       return ti;
     case 002: {  // register jump (with return)
-      NEED(c->A_rdy[k]);
+      NEED(c->A_rdy[k]); NEED(c->A_rdy[i]);
       ISSUE;
       uint32_t tgt = c->A[k];
       c->A[i] = nextP; c->A_rdy[i] = ti + T.a_add;
@@ -214,7 +217,12 @@ static uint64_t step(CPU *c, int dry) {
       break;
     }
     case 006: ISSUE; __atomic_store_n(&semaphore, 1, __ATOMIC_SEQ_CST); break;
-    case 007: ISSUE; __atomic_store_n(&semaphore, 0, __ATOMIC_SEQ_CST); break;
+    case 007:
+      // HR-2000 3.2: the semaphore is released, and the following instruction
+      // issues, only once the Common Memory quadrant buffers are clear, so
+      // earlier stores are complete before another processor can proceed.
+      NEED(c->cm_drain); NEED(c->unit_free[U_CMP]);
+      ISSUE; __atomic_store_n(&semaphore, 0, __ATOMIC_SEQ_CST); break;
     case 010: case 011: case 012: case 013: {
       NEED(c->A_rdy[k]);
       ISSUE;
@@ -241,10 +249,10 @@ static uint64_t step(CPU *c, int dry) {
       c->A_rdy[i] = ti + (u == U_AADD ? T.a_add : T.a_mul);
       break;
     }
-    case 024: NEED(c->S_rdy[j]); ISSUE; c->A[i] = (uint32_t)c->S[j]; c->A_rdy[i] = ti + T.a_add; break;
-    case 025: ISSUE; c->A[i] = c->VL & 63; c->A_rdy[i] = ti + T.a_add; break;
-    case 026: ISSUE; c->A[i] = jk; c->A_rdy[i] = ti + 1; break;
-    case 027: ISSUE; c->A[i] = 0xFFFFFFC0u | jk; c->A_rdy[i] = ti + 1; break;
+    case 024: NEED(c->S_rdy[j]); NEED(c->A_rdy[i]); ISSUE; c->A[i] = (uint32_t)c->S[j]; c->A_rdy[i] = ti + T.a_add; break;
+    case 025: NEED(c->A_rdy[i]); ISSUE; c->A[i] = c->VL & 63; c->A_rdy[i] = ti + T.a_add; break;
+    case 026: NEED(c->A_rdy[i]); ISSUE; c->A[i] = jk; c->A_rdy[i] = ti + 1; break;
+    case 027: NEED(c->A_rdy[i]); ISSUE; c->A[i] = 0xFFFFFFC0u | jk; c->A_rdy[i] = ti + 1; break;
     case 030: case 031: case 032: case 033: {
       VSRC(k); NEED(c->unit_free[U_VLOG]);
       ISSUE;
@@ -259,16 +267,16 @@ static uint64_t step(CPU *c, int dry) {
       c->VM_rdy = ti + T.v_log + n;
       break;
     }
-    case 034: NEED(c->S_rdy[j]); ISSUE; c->VM = c->S[j]; c->VM_rdy = ti + 1; break;
+    case 034: NEED(c->S_rdy[j]); NEED(c->VM_rdy); ISSUE; c->VM = c->S[j]; c->VM_rdy = ti + 1; break;
     case 035:
       ISSUE;
       if (k == 0) c->halt_range = 0; else if (k == 1) c->halt_range = 1;
       else if (k == 2) c->halt_fp = 0; else if (k == 3) c->halt_fp = 1;
       break;
     case 036: case 037: NEED(c->A_rdy[k]); ISSUE; c->VL = c->A[k] & 63; if (!c->VL) c->VL = 64; break;
-    case 040: ISSUE; c->A[i] = m & 0xffff; c->A_rdy[i] = ti + 1; break;
-    case 041: ISSUE; c->A[i] = 0xFFFF0000u | (m & 0xffff); c->A_rdy[i] = ti + 1; break;
-    case 042: case 043: ISSUE; c->A[i] = m; c->A_rdy[i] = ti + 1; break;
+    case 040: NEED(c->A_rdy[i]); ISSUE; c->A[i] = m & 0xffff; c->A_rdy[i] = ti + 1; break;
+    case 041: NEED(c->A_rdy[i]); ISSUE; c->A[i] = 0xFFFF0000u | (m & 0xffff); c->A_rdy[i] = ti + 1; break;
+    case 042: case 043: NEED(c->A_rdy[i]); ISSUE; c->A[i] = m; c->A_rdy[i] = ti + 1; break;
     case 044: case 046: case 054: case 056: {
       uint32_t addr = m;
       if (f == 046 || f == 056) { NEED(c->A_rdy[k]); addr = c->A[k]; }
@@ -297,10 +305,10 @@ static uint64_t step(CPU *c, int dry) {
       c->unit_free[U_LMP] = ti + 1; c->unit_busy[U_LMP]++;
       break;
     }
-    case 050: ISSUE; c->S[i] = m; c->S_rdy[i] = ti + 1; break;
-    case 051: ISSUE; c->S[i] = 0xFFFFFFFF00000000ULL | m; c->S_rdy[i] = ti + 1; break;
-    case 052: ISSUE; c->S[i] = (uint64_t)m << 32; c->S_rdy[i] = ti + 1; break;
-    case 053: ISSUE; c->S[i] = mf; c->S_rdy[i] = ti + 1; break;
+    case 050: NEED(c->S_rdy[i]); ISSUE; c->S[i] = m; c->S_rdy[i] = ti + 1; break;
+    case 051: NEED(c->S_rdy[i]); ISSUE; c->S[i] = 0xFFFFFFFF00000000ULL | m; c->S_rdy[i] = ti + 1; break;
+    case 052: NEED(c->S_rdy[i]); ISSUE; c->S[i] = (uint64_t)m << 32; c->S_rdy[i] = ti + 1; break;
+    case 053: NEED(c->S_rdy[i]); ISSUE; c->S[i] = mf; c->S_rdy[i] = ti + 1; break;
     case 060: case 062: case 064: case 066: case 061: case 063: case 065: case 067: {
       uint32_t addr;
       int load = !(f & 1);
@@ -314,6 +322,7 @@ static uint64_t step(CPU *c, int dry) {
       uint64_t acc = cm_access(c, (uint64_t)c->BA + addr, ti);
       if (load) { c->S[i] = cm_read_sync(c, addr); c->S_rdy[i] = acc + T.cm_load_lat; }
       else cm_write_sync(c, addr, c->S[i]);
+      c->cm_drain = max64(c->cm_drain, acc + 1);
       c->unit_free[U_CMP] = ti + 1; c->unit_busy[U_CMP]++; c->cm_words++;
       break;
     }
@@ -342,6 +351,7 @@ static uint64_t step(CPU *c, int dry) {
         c->V_wr[vr] = last + T.cm_load_lat;
       } else c->V_rd[vr] = max64(c->V_rd[vr], last);
       if (gather) c->V_rd[vx] = max64(c->V_rd[vx], last);
+      c->cm_drain = max64(c->cm_drain, last + 1);
       c->unit_free[U_CMP] = last + T.cm_vec_tail;
       c->unit_busy[U_CMP] += c->unit_free[U_CMP] - ti;
       c->n_vec++; c->n_vec_elems += n; c->cm_words += n;
@@ -695,16 +705,22 @@ int main(int argc, char **argv) {
       size_t got = fread(CM + at, 8, nw, fp); fclose(fp);
       printf("OK %zu\n", got); fflush(stdout);
     } else if (!strcmp(cmd, "w")) {  // w ADDR v1 v2 ... (hex)
-      char *p = line + 1; unsigned long long at = strtoull(p, &p, 0);
-      int cnt = 0, bad = 0;
-      for (;;) {
+      // parse and check every value before writing any, so a bad line changes nothing
+      char *p = line + 1, *e; unsigned long long at = strtoull(p, &e, 0);
+      static uint64_t vals[CM_WORDS < 65536 ? CM_WORDS : 65536];
+      int cnt = 0; const char *err = e == p ? "ERR address" : NULL;
+      for (p = e; !err;) {
         while (*p == ' ') p++;
         if (*p == '\n' || !*p) break;
-        uint64_t v = strtoull(p, &p, 16);
-        if (at + cnt >= CM_WORDS) { bad = 1; break; }
-        CM[at + cnt++] = v;
+        uint64_t v = strtoull(p, &e, 16);
+        if (e == p || (*e && *e != ' ' && *e != '\n')) err = "ERR value";
+        else if (cnt == (int)(sizeof vals / sizeof *vals)) err = "ERR too many values";
+        else if (at + cnt >= CM_WORDS) err = "ERR address";
+        else vals[cnt++] = v;
+        p = e;
       }
-      if (bad) printf("ERR address\n"); else printf("OK %d\n", cnt);
+      if (err) printf("%s\n", err);
+      else { memcpy(CM + at, vals, cnt * sizeof *vals); printf("OK %d\n", cnt); }
       fflush(stdout);
     } else if (!strcmp(cmd, "r")) {  // r ADDR N (hex output)
       unsigned long long at = 0, nn = 0;

@@ -172,7 +172,7 @@ How the 1989 revision changes this (HR-02000-0D pp.4-1..4-2):
 
 - Works by adding a constant integer. The result is at most 48 bits and is sign-extended to 64 bits (p.2-14, checked visually).
 - A value larger than a 48-bit integer is an error (if enabled) and gives 0.
-- The Dec-82 design gives the constant as 0 40060 0000000000000000, with no round bit, so FIX truncates.
+- **Rounding is unresolved.** The 1985 manual says FIX is an add, and that the add unit rounds the coefficient it shifts for exponent matching ("rounded up", p.2-13); that suggests round to nearest. The Dec-82 design gives the constant as 0 40060 0000000000000000 with no round bit, which suggests truncation. The emulator assumes rounding (half up on magnitude). Code that needs a particular rounding can add ±0.5 first at the cost of one extra add.
 
 **FLT (123, 175)**: add to a constant and normalize. Only 48 bits of the operand are used; higher bits are discarded with no error.
 

@@ -19,7 +19,7 @@ R = {'Ai': r'(?P<i>A[0-7])', 'Aj': r'(?P<j>A[0-7])', 'Ak': r'(?P<k>A[0-7])',
 
 # (template, opcode, kind).  kind: 'ijk' plain; special handling otherwise.
 FORMS = [
-    ('EXIT exp', 0o000, 'exitx'), ('EXIT', 0o000, 'none'), ('ERR', 0o000, 'none'), ('PASS', 0o076, 'none'),
+    ('EXIT exp', 0o000, 'exitx'), ('EXIT', 0o000, 'exit1'), ('ERR', 0o000, 'none'), ('PASS', 0o076, 'none'),
     ('DRI', 0o035, 'k0'), ('ERI', 0o035, 'k1'), ('DFI', 0o035, 'k2'), ('EFI', 0o035, 'k3'),
     ('R,Ai Ak', 0o002, 'ijk'), ('J Ak', 0o002, 'jak'), ('J exp', 0o003, 'm2'),
     ('JCS exp', 0o004, 'm2'), ('JSS exp', 0o005, 'm2'), ('SSM', 0o006, 'none'), ('CSM', 0o007, 'none'),
@@ -114,6 +114,8 @@ class Assembler:
             val = self.ev(x, final) if x is not None else None
             if kind == 'none':
                 return [op << 9]
+            if kind == 'exit1':                  # bare EXIT is a normal exit, code 1
+                return [(op << 9) | 1]
             if kind == 'exitx':
                 v = val if val is not None else 1
                 assert 0 <= v < 64, 'exit code'

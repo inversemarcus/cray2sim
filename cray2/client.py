@@ -60,7 +60,9 @@ class Sim:
 
     def write(self, addr, vals):
         for i in range(0, len(vals), 40):
-            self.cmd('w %d %s' % (addr + i, ' '.join('%x' % v for v in vals[i:i + 40])))
+            r = self.cmd('w %d %s' % (addr + i, ' '.join('%x' % v for v in vals[i:i + 40])))
+            if not r.startswith('OK'):
+                raise RuntimeError(r)
 
     def stats(self):
         self.p.stdin.write('stats\n')

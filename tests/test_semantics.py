@@ -334,15 +334,29 @@ got:    S1 RT
         if not r[1] > r[0] + 1000: bad.append(r)
     check('semaphore clock order within an mt window', not bad, str(bad[:3]))
 
-    # protocol: a NUL byte in a line, and lines longer than any fixed buffer,
-    # get exactly one reply each (all input is sent at once, so an emulator
-    # that loses sync gives too few replies rather than hanging)
-    s = Sim(())
-    out, _ = s.p.communicate('w 256 7\0x\n' + 'w 256 ' + '1 ' * 5000 + '\n' + 'r 5255 1\nquit\n', timeout=30)
-    replies = out.splitlines()
-    check('NUL and long lines keep protocol sync',
-          len(replies) == 3 and replies[0].startswith('OK') and replies[1].startswith('OK')
-          and replies[2].split()[-1:] == ['1'], str(replies)[:200])
+    # protocol: a NUL byte in a line, a blank line, and lines longer than any
+    # fixed buffer get exactly one reply each (all input is sent at once, so an
+    # emulator that loses sync gives too few replies rather than hanging)
+    with tempfile.TemporaryDirectory() as d:
+        # a dump FILE over 1023 characters whose first 1023 end in d/.../su: an
+        # emulator that cuts the name would create the file 'su'
+        os.mkdir(os.path.join(d, 'sub'))
+        base = d + '/'
+        k, pad = divmod(1021 - len(base), 7)
+        longname = base + '/' * pad + 'sub/../' * (k + 5) + 'out.bin'
+        s = Sim(())
+        out, _ = s.p.communicate('w 256 7\0x\n' + '\n' + '   \n' + '\0w 256 7\n'
+                                 + 'w 256 ' + '1 ' * 5000 + '\n' + 'r 256 1\n'
+                                 + 'dump 256 2 %s\n' % longname + 'quit\n', timeout=30)
+        replies = out.splitlines()
+        # the full name is either written exactly or rejected (it exceeds
+        # PATH_MAX on some hosts), never cut short
+        out_bin = os.path.join(d, 'out.bin')
+        dumped = not os.path.exists(os.path.join(d, 'su')) and (
+            (replies[-1:] == ['OK'] and os.path.getsize(out_bin) == 16) or replies[-1:][0].startswith('ERR'))
+    check('NUL, blank and long lines: one reply each',
+          [r.split()[0] for r in replies][:6] == ['ERR', 'ERR', 'ERR', 'ERR', 'OK', 'DATA'] and len(replies) == 7
+          and replies[4] == 'OK 5000' and replies[5] == 'DATA 1' and dumped, str(replies)[:200])
     sys.exit(1 if FAIL else 0)
 
 

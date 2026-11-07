@@ -19,6 +19,9 @@ in files.
 | `timing NAME=VALUE` | `OK` | Change a timing parameter (see TIMING.md) |
 | `quit` | | Exit |
 
+Every line gets exactly one reply. An empty line, a line containing a NUL
+byte, an unknown command or a malformed one gets a single `ERR ...` line.
+
 Command-line arguments: timing overrides `NAME=VALUE`, `mt=1` for fast
 multithreaded mode, `qwin=N` for its window size.
 

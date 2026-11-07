@@ -13,6 +13,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include "cray2fp.h"
 
 #define NCPU 4
@@ -565,10 +566,11 @@ static uint64_t step(CPU *c, int dry) {
 
 // ---------------- Foreground Processor (host) protocol ----------------
 // Exact mode: always execute the instruction that issues earliest across the
-// four processors (lowest index on ties).  A processor's next issue time
-// depends on its own state and, for a semaphore instruction, on sem_time, so
-// it is recomputed after that processor executes, and every processor's is
-// recomputed after a semaphore operation.
+// four processors (lowest index on ties).  A processor's next issue time is
+// recomputed only after that processor executes.  It also depends on sem_time
+// for a semaphore instruction, but that bound never changes another
+// processor's cached time: the operation just executed issued no later than
+// every other processor's next instruction, so sem_time stays <= each next[q].
 static int is_sema(CPU *c) { int f = parcel(c, c->P) >> 9; return f >= 004 && f <= 007; }
 static void run(void) {
   uint64_t next[NCPU];
@@ -579,11 +581,9 @@ static void run(void) {
     for (int q = 0; q < NCPU; q++)
       if (cpu[q].running && (best < 0 || next[q] < next[best])) best = q;
     if (best < 0) return;
-    int sema = is_sema(&cpu[best]);
     step(&cpu[best], 0);
     if (!cpu[best].running) return;
-    for (int q = 0; q < NCPU; q++)
-      if (cpu[q].running && (q == best || sema)) next[q] = step(&cpu[q], 1);
+    next[best] = step(&cpu[best], 1);
   }
 }
 
@@ -638,7 +638,10 @@ static void *mt_worker(void *arg) {
         for (int q = 0; q < NCPU; q++) {
           if (q == c->id) continue;
           uint64_t pq;
-          while ((pq = __atomic_load_n(&cpu[q].pub, __ATOMIC_ACQUIRE)) < ti || (pq == ti && q < c->id)) { }
+          // yield after a while, so a peer whose host thread is not scheduled
+          // (fewer host cores than processors) can make progress
+          for (int n = 0; (pq = __atomic_load_n(&cpu[q].pub, __ATOMIC_ACQUIRE)) < ti || (pq == ti && q < c->id); n++)
+            if (n >= 1000) sched_yield();
         }
       }
       c->held = 0;
@@ -728,11 +731,13 @@ int main(int argc, char **argv) {
   }
   char *line = NULL; size_t line_cap = 0;
   printf("READY cray2sim 4cpu %u words\n", CM_WORDS); fflush(stdout);
-  // getline reads each command line whole, whatever its length or content, so
-  // every line gets exactly one reply
-  while (getline(&line, &line_cap, stdin) > 0) {
+  // getline reads each command line whole, whatever its length, and every
+  // line gets exactly one reply: a line with a NUL byte or no command is an error
+  ssize_t len;
+  while ((len = getline(&line, &line_cap, stdin)) > 0) {
     char cmd[32] = "";
-    sscanf(line, "%31s", cmd);
+    if ((size_t)len != strlen(line)) { printf("ERR NUL in line\n"); fflush(stdout); continue; }
+    if (sscanf(line, "%31s", cmd) != 1) { printf("ERR empty line\n"); fflush(stdout); continue; }
     if (!strcmp(cmd, "load")) {  // load FILE WORDADDR : raw little-endian words (FILE may contain spaces)
       char *sp1 = strchr(line, ' '), *sp2 = strrchr(line, ' ');
       if (!sp1 || sp2 == sp1) { printf("ERR usage: load FILE ADDR\n"); fflush(stdout); continue; }
@@ -775,10 +780,14 @@ int main(int argc, char **argv) {
       for (unsigned long long q = 0; q < nn; q++) printf(" %llx", (unsigned long long)CM[at + q]);
       printf("\n"); fflush(stdout);
     } else if (!strcmp(cmd, "dump")) {  // dump ADDR N FILE
-      unsigned long long at = 0, nn = 0; char fn[1024];
-      if (sscanf(line, "%*s %llu %llu %1023[^\n]", &at, &nn, fn) != 3 || at > CM_WORDS || nn > CM_WORDS - at) {
+      // FILE is the rest of the line (it may contain spaces), used in place
+      unsigned long long at = 0, nn = 0; int off = 0;
+      if (sscanf(line, "%*s %llu %llu %n", &at, &nn, &off) != 2 || !off || at > CM_WORDS || nn > CM_WORDS - at) {
         printf("ERR usage: dump ADDR N FILE\n"); fflush(stdout); continue;
       }
+      char *fn = line + off;
+      fn[strcspn(fn, "\n")] = 0;
+      if (!*fn) { printf("ERR usage: dump ADDR N FILE\n"); fflush(stdout); continue; }
       FILE *fp = fopen(fn, "wb");
       if (!fp) { printf("ERR %s\n", strerror(errno)); fflush(stdout); continue; }
       fwrite(CM + at, 8, nn, fp); fclose(fp);
@@ -818,7 +827,7 @@ int main(int argc, char **argv) {
       fflush(stdout);
     } else if (!strcmp(cmd, "quit")) {
       break;
-    } else if (cmd[0]) {
+    } else {
       printf("ERR unknown %s\n", cmd); fflush(stdout);
     }
   }

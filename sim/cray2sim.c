@@ -65,6 +65,8 @@ typedef struct {
   uint64_t A_rdy[8], S_rdy[8], V_wr[8], V_rd[8], VM_rdy;
   uint64_t cm_drain;  // when this processor's last Common Memory reference has been accepted
   uint64_t held;      // mt mode: issue time of a semaphore instruction deferred to a later window
+  uint64_t pub;       // mt mode: lower bound on the issue time of this processor's next semaphore
+                      // instruction in the current window (~0 when it has none); atomic
   uint64_t unit_free[NUNIT];
   uint64_t ibuf[8];
   int ibuf_n, ibuf_next;
@@ -219,16 +221,17 @@ static uint64_t step(CPU *c, int dry) {
         // earlier stores are complete before another processor can proceed.
         NEED(c->cm_drain); NEED(c->unit_free[U_CMP]);
       }
-      // Semaphore operations take effect in clock order across processors: in
-      // multithreaded mode none may issue before the last change of the flag.
-      if (!dry) pthread_mutex_lock(&sem_lock);
-      NEED(sem_time);
       if (f <= 005) ti += T.sema;
-      if (dry) return ti;
+      // Semaphore operations take effect in clock order across processors.  The
+      // schedulers (run, mt_worker) execute them in issue-time order, so this
+      // bound only guards that order; it does not normally delay anything.
+      NEED(__atomic_load_n(&sem_time, __ATOMIC_ACQUIRE));
+      ISSUE;
+      pthread_mutex_lock(&sem_lock);
       int was = semaphore;
       semaphore = f != 007;
       if ((f == 004 && !was) || (f == 005 && was)) { nextP = m; taken = 1; }
-      if (ti > sem_time) sem_time = ti;
+      if (ti > sem_time) __atomic_store_n(&sem_time, ti, __ATOMIC_RELEASE);
       pthread_mutex_unlock(&sem_lock);
       break;
     }
@@ -562,8 +565,11 @@ static uint64_t step(CPU *c, int dry) {
 
 // ---------------- Foreground Processor (host) protocol ----------------
 // Exact mode: always execute the instruction that issues earliest across the
-// four processors.  A processor's next issue time depends only on its own
-// state, so it is recomputed only after that processor executes.
+// four processors (lowest index on ties).  A processor's next issue time
+// depends on its own state and, for a semaphore instruction, on sem_time, so
+// it is recomputed after that processor executes, and every processor's is
+// recomputed after a semaphore operation.
+static int is_sema(CPU *c) { int f = parcel(c, c->P) >> 9; return f >= 004 && f <= 007; }
 static void run(void) {
   uint64_t next[NCPU];
   for (int q = 0; q < NCPU; q++)
@@ -573,9 +579,11 @@ static void run(void) {
     for (int q = 0; q < NCPU; q++)
       if (cpu[q].running && (best < 0 || next[q] < next[best])) best = q;
     if (best < 0) return;
+    int sema = is_sema(&cpu[best]);
     step(&cpu[best], 0);
     if (!cpu[best].running) return;
-    next[best] = step(&cpu[best], 1);
+    for (int q = 0; q < NCPU; q++)
+      if (cpu[q].running && (q == best || sema)) next[q] = step(&cpu[q], 1);
   }
 }
 
@@ -603,6 +611,8 @@ static void mt_advance(void) {
   }
   if (!any_running || any_exit) { mt_stop = 1; return; }
   mt_window = tmin + QWIN;
+  for (int q = 0; q < NCPU; q++)
+    __atomic_store_n(&cpu[q].pub, cpu[q].running ? max64(cpu[q].t, cpu[q].held) : ~0ULL, __ATOMIC_RELEASE);
   for (int i = 0; i < NCPU; i++)
     for (int b = 0; b < NBANK; b++) {
       uint64_t m = 0;
@@ -618,14 +628,24 @@ static void *mt_worker(void *arg) {
       // A semaphore instruction must not take effect before its own issue
       // time (CSM can wait thousands of CP for stores to drain), so it runs
       // only in the window that contains that time.
-      int f = parcel(c, c->P) >> 9;
-      if (f >= 004 && f <= 007) {
+      if (is_sema(c)) {
         uint64_t ti = step(c, 1);
         if (ti >= mt_window) { c->held = ti; break; }
+        // Within the window, semaphore operations run in issue-time order
+        // (lowest processor first on ties), as in exact mode: wait until no
+        // other processor can still reach one that issues earlier.
+        __atomic_store_n(&c->pub, ti, __ATOMIC_RELEASE);
+        for (int q = 0; q < NCPU; q++) {
+          if (q == c->id) continue;
+          uint64_t pq;
+          while ((pq = __atomic_load_n(&cpu[q].pub, __ATOMIC_ACQUIRE)) < ti || (pq == ti && q < c->id)) { }
+        }
       }
       c->held = 0;
       step(c, 0);
+      __atomic_store_n(&c->pub, c->running ? c->t : ~0ULL, __ATOMIC_RELEASE);
     }
+    __atomic_store_n(&c->pub, ~0ULL, __ATOMIC_RELEASE);
     bar_wait(&mt_bar);
     if (c->id == 0) mt_advance();
     bar_wait(&mt_bar);
@@ -706,15 +726,11 @@ int main(int argc, char **argv) {
     cpu[q].id = q; cpu[q].LM = calloc(LM_WORDS, 8); cpu[q].VL = 64; cpu[q].LA = CM_WORDS;
     cpu[q].exit_code = 1000;
   }
-  char line[4096];
+  char *line = NULL; size_t line_cap = 0;
   printf("READY cray2sim 4cpu %u words\n", CM_WORDS); fflush(stdout);
-  while (fgets(line, sizeof line, stdin)) {
-    // a line that does not fit is consumed in full and rejected
-    int line_ok = strchr(line, '\n') || feof(stdin);
-    if (!line_ok) {
-      int ch; while ((ch = getchar()) != EOF && ch != '\n') { }
-      printf("ERR line too long\n"); fflush(stdout); continue;
-    }
+  // getline reads each command line whole, whatever its length or content, so
+  // every line gets exactly one reply
+  while (getline(&line, &line_cap, stdin) > 0) {
     char cmd[32] = "";
     sscanf(line, "%31s", cmd);
     if (!strcmp(cmd, "load")) {  // load FILE WORDADDR : raw little-endian words (FILE may contain spaces)

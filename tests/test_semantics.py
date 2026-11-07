@@ -294,6 +294,55 @@ got:    S1 RT
 """ % float_to_cray(1.0)}, args=args)
         r = s.read(0x8500, 2); s.close()
         check('CSM drain orders the semaphore %s' % (' '.join(args) or 'exact'), r[1] >= r[0] - 10 and r[0] > 3000, str(r))
+
+    # semaphore jumps on two processors at the same clock period are not
+    # charged the semaphore time twice: both issue together, and CPU1 is later
+    # only by the taken-branch time, since CPU0's JSS has set the semaphore
+    prog = """
+        JSS x
+x:      S1 RT
+        (%d) S1
+        EXIT 1
+"""
+    s, ex = run({0: prog % 0x8600, 1: prog % 0x8601})
+    r = s.read(0x8600, 2); s.close()
+    check('simultaneous JSS issue together', r[1] - r[0] == 4, str(r))
+
+    # fast mode, large window: semaphore operations inside a window still take
+    # effect in clock order whatever the host thread scheduling (repeat runs)
+    bad = []
+    for _ in range(20):
+        s, ex = run({0: """
+        SSM
+        S1 RT
+        (0x8700) S1
+        A5 1000
+        A6 1
+wait:   A5 A5-A6
+        JN A5,wait
+        CSM
+        EXIT 1
+""", 1: """
+spin:   JCS got
+        J spin
+got:    S1 RT
+        (0x8701) S1
+        CSM
+        EXIT 1
+"""}, args=('mt=1', 'qwin=100000'))
+        r = s.read(0x8700, 2); s.close()
+        if not r[1] > r[0] + 1000: bad.append(r)
+    check('semaphore clock order within an mt window', not bad, str(bad[:3]))
+
+    # protocol: a NUL byte in a line, and lines longer than any fixed buffer,
+    # get exactly one reply each (all input is sent at once, so an emulator
+    # that loses sync gives too few replies rather than hanging)
+    s = Sim(())
+    out, _ = s.p.communicate('w 256 7\0x\n' + 'w 256 ' + '1 ' * 5000 + '\n' + 'r 5255 1\nquit\n', timeout=30)
+    replies = out.splitlines()
+    check('NUL and long lines keep protocol sync',
+          len(replies) == 3 and replies[0].startswith('OK') and replies[1].startswith('OK')
+          and replies[2].split()[-1:] == ['1'], str(replies)[:200])
     sys.exit(1 if FAIL else 0)
 
 

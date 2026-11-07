@@ -73,9 +73,10 @@ synchronised every N clock periods (default 2,000). Within a window a
 processor sees other processors' bank-busy times as of the window start, so
 cross-processor bank conflicts inside a window are missed. Scalar Common
 Memory references are atomic acquire/release accesses. Semaphore instructions
-are serialized and take effect in clock order: none issues before the clock
-period of the last semaphore operation, and a processor runs one only in the
-window containing its issue time. Programs
+take effect in clock order, as in the default mode: a processor runs one only
+in the window containing its issue time, and within a window only after every
+other processor has passed that clock period (ties go to the lower-numbered
+processor). Semaphore-heavy programs therefore gain less from this mode. Programs
 that synchronise through the semaphore and scalar memory words, as real CRAY-2
 programs must, compute the same results as in the default mode; the model
 programs in cray2-llm produced bit-identical outputs in both modes in our
